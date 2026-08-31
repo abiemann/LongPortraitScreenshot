@@ -28,7 +28,7 @@ dotnet run --project .\tests\LongPortraitScreenshot.SelfTest\LongPortraitScreens
 3. Release the mouse. The utility scrolls the pane, captures it, restores its original position, and asks where to save the PNG.
 4. Press Escape during capture to cancel.
 
-The scrollbar-crop and horizontal-empty-space trim options are enabled by default and remembered for each Windows user. Horizontal trimming keeps a 5-pixel margin beside detected content.
+The scrollbar-crop, horizontal-empty-space trim, and repeated-fixed-overlay cleanup options are enabled by default and remembered for each Windows user. Horizontal trimming keeps a 5-pixel margin beside detected content. Overlay cleanup removes small floating controls only when at least three matching copies can be identified safely.
 
 The first release supports vertical UI Automation scroll containers. Elevated, protected, minimized, moving, dynamically changing, or non-UI-Automation controls may not be capturable.
 

@@ -12,6 +12,7 @@ public sealed class MainForm : Form
     private readonly Label _statusLabel = new();
     private readonly CheckBox _cropVerticalScrollIndicatorCheckBox = new();
     private readonly CheckBox _trimEmptyHorizontalSpaceCheckBox = new();
+    private readonly CheckBox _removeRepeatedFixedOverlaysCheckBox = new();
     private readonly System.Windows.Forms.Timer _resolveTimer = new() { Interval = 60 };
     private readonly TargetOverlay _targetOverlay = new();
     private readonly AppSettings _settings;
@@ -27,8 +28,8 @@ public sealed class MainForm : Form
         _settings = AppSettings.Load();
 
         Text = "Long Portrait Screenshot";
-        ClientSize = new Size(460, 380);
-        MinimumSize = new Size(476, 419);
+        ClientSize = new Size(460, 414);
+        MinimumSize = new Size(476, 453);
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
@@ -77,11 +78,17 @@ public sealed class MainForm : Form
         _trimEmptyHorizontalSpaceCheckBox.Margin = new Padding(0, 0, 0, 6);
         _trimEmptyHorizontalSpaceCheckBox.Text = "Trim empty space on left and right (5 px margin)";
 
+        _removeRepeatedFixedOverlaysCheckBox.Anchor = AnchorStyles.Left;
+        _removeRepeatedFixedOverlaysCheckBox.AutoSize = true;
+        _removeRepeatedFixedOverlaysCheckBox.Checked = _settings.RemoveRepeatedFixedOverlays;
+        _removeRepeatedFixedOverlaysCheckBox.Margin = new Padding(0, 0, 0, 6);
+        _removeRepeatedFixedOverlaysCheckBox.Text = "Remove repeated fixed buttons and overlays";
+
         var layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 7,
+            RowCount = 8,
             Padding = new Padding(24, 20, 24, 16)
         };
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -91,13 +98,15 @@ public sealed class MainForm : Form
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         layout.Controls.Add(title, 0, 0);
         layout.Controls.Add(instructions, 0, 1);
         layout.Controls.Add(_finderTarget, 0, 2);
         layout.Controls.Add(_targetLabel, 0, 3);
         layout.Controls.Add(_cropVerticalScrollIndicatorCheckBox, 0, 4);
         layout.Controls.Add(_trimEmptyHorizontalSpaceCheckBox, 0, 5);
-        layout.Controls.Add(_statusLabel, 0, 6);
+        layout.Controls.Add(_removeRepeatedFixedOverlaysCheckBox, 0, 6);
+        layout.Controls.Add(_statusLabel, 0, 7);
         Controls.Add(layout);
 
         _finderTarget.DragStarted += FinderTarget_DragStarted;
@@ -105,6 +114,7 @@ public sealed class MainForm : Form
         _finderTarget.DragEnded += FinderTarget_DragEnded;
         _cropVerticalScrollIndicatorCheckBox.CheckedChanged += CropVerticalScrollIndicatorCheckBox_CheckedChanged;
         _trimEmptyHorizontalSpaceCheckBox.CheckedChanged += TrimEmptyHorizontalSpaceCheckBox_CheckedChanged;
+        _removeRepeatedFixedOverlaysCheckBox.CheckedChanged += RemoveRepeatedFixedOverlaysCheckBox_CheckedChanged;
         _resolveTimer.Tick += ResolveTimer_Tick;
     }
 
@@ -117,6 +127,12 @@ public sealed class MainForm : Form
     private void TrimEmptyHorizontalSpaceCheckBox_CheckedChanged(object? sender, EventArgs e)
     {
         _settings.TrimEmptyHorizontalSpace = _trimEmptyHorizontalSpaceCheckBox.Checked;
+        SaveSettingsAfterOptionChange();
+    }
+
+    private void RemoveRepeatedFixedOverlaysCheckBox_CheckedChanged(object? sender, EventArgs e)
+    {
+        _settings.RemoveRepeatedFixedOverlays = _removeRepeatedFixedOverlaysCheckBox.Checked;
         SaveSettingsAfterOptionChange();
     }
 
@@ -228,7 +244,8 @@ public sealed class MainForm : Form
     {
         CaptureOptions captureOptions = new(
             _cropVerticalScrollIndicatorCheckBox.Checked,
-            _trimEmptyHorizontalSpaceCheckBox.Checked);
+            _trimEmptyHorizontalSpaceCheckBox.Checked,
+            _removeRepeatedFixedOverlaysCheckBox.Checked);
         _capturing = true;
         _finderTarget.Enabled = false;
         _statusLabel.Text = "Capturing… Press Escape to cancel.";

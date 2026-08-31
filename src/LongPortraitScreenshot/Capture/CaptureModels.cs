@@ -4,7 +4,8 @@ namespace LongPortraitScreenshot.Capture;
 
 public sealed record CaptureOptions(
     bool CropVerticalScrollIndicator,
-    bool TrimEmptyHorizontalSpace);
+    bool TrimEmptyHorizontalSpace,
+    bool RemoveRepeatedFixedOverlays);
 
 public sealed class CaptureResult : IDisposable
 {

@@ -196,7 +196,10 @@ internal static class CaptureSession
                 }
 
                 ThrowIfCancelled(cancellationToken);
-                stitched = VerticalStitcher.Stitch(frames, MaximumOutputPixels);
+                stitched = VerticalStitcher.Stitch(
+                    frames,
+                    MaximumOutputPixels,
+                    options.RemoveRepeatedFixedOverlays);
                 if (options.CropVerticalScrollIndicator)
                 {
                     int scrollBarWidth = ScrollbarCropper.GetVerticalScrollBarWidth(captureBounds);

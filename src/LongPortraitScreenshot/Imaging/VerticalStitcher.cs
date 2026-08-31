@@ -9,7 +9,10 @@ public static class VerticalStitcher
 {
     private const double MaximumAcceptablePixelError = 22.0;
 
-    public static Bitmap Stitch(IReadOnlyList<CapturedFrame> frames, long maxPixels = 40_000_000)
+    public static Bitmap Stitch(
+        IReadOnlyList<CapturedFrame> frames,
+        long maxPixels = 40_000_000,
+        bool removeRepeatedFixedOverlays = false)
     {
         ArgumentNullException.ThrowIfNull(frames);
 
@@ -60,26 +63,33 @@ public static class VerticalStitcher
 
         try
         {
-            using Graphics graphics = Graphics.FromImage(output);
-            graphics.CompositingMode = CompositingMode.SourceCopy;
-            graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
-            graphics.PixelOffsetMode = PixelOffsetMode.None;
-            graphics.DrawImageUnscaled(frames[0].Image, 0, 0);
-
-            int destinationY = height;
-            for (int index = 1; index < frames.Count; index++)
+            using (Graphics graphics = Graphics.FromImage(output))
             {
-                int newRows = shifts[index - 1];
-                int sourceY = height - newRows;
-                graphics.DrawImage(
-                    frames[index].Image,
-                    new Rectangle(0, destinationY, width, newRows),
-                    0,
-                    sourceY,
-                    width,
-                    newRows,
-                    GraphicsUnit.Pixel);
-                destinationY += newRows;
+                graphics.CompositingMode = CompositingMode.SourceCopy;
+                graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
+                graphics.PixelOffsetMode = PixelOffsetMode.None;
+                graphics.DrawImageUnscaled(frames[0].Image, 0, 0);
+
+                int destinationY = height;
+                for (int index = 1; index < frames.Count; index++)
+                {
+                    int newRows = shifts[index - 1];
+                    int sourceY = height - newRows;
+                    graphics.DrawImage(
+                        frames[index].Image,
+                        new Rectangle(0, destinationY, width, newRows),
+                        0,
+                        sourceY,
+                        width,
+                        newRows,
+                        GraphicsUnit.Pixel);
+                    destinationY += newRows;
+                }
+            }
+
+            if (removeRepeatedFixedOverlays)
+            {
+                RepeatedOverlayRemover.Remove(output, height, shifts, frames);
             }
 
             return output;

@@ -14,6 +14,10 @@ internal static class Program
         {
             StitchOverlappingFramesReconstructsOriginal();
             StitchSingleFrameReturnsIndependentClone();
+            RemoveRepeatedFixedOverlaysRestoresChangingBackground();
+            RemoveRepeatedFixedOverlaysLeavesDifferentImagesUntouched();
+            RemoveRepeatedFixedOverlaysRequiresSafeBackground();
+            RepeatedPageIconsFollowingStitchMotionRemainUntouched();
             CropRightRemovesExpectedPixelsAndPreservesDpi();
             CropRightKeepsOnePixelForNarrowImages();
             TrimEmptySpaceFromBothSidesKeepsFivePixelMargins();
@@ -95,6 +99,149 @@ internal static class Program
         source.SetPixel(0, 0, Color.Magenta);
         Require(actual.GetPixel(0, 0).ToArgb() == originalFirstPixel.ToArgb(),
             "The stitched bitmap changed after the source bitmap was modified.");
+    }
+
+    private static void RemoveRepeatedFixedOverlaysRestoresChangingBackground()
+    {
+        using Bitmap expected = CreateOverlayTestPage();
+        List<Bitmap> frameBitmaps = [];
+
+        try
+        {
+            List<CapturedFrame> frames = CreateOverlayTestFrames(
+                expected,
+                frameBitmaps,
+                _ => Color.FromArgb(232, 82, 52));
+
+            using Bitmap actual = VerticalStitcher.Stitch(
+                frames,
+                MaximumOutputPixels,
+                removeRepeatedFixedOverlays: true);
+
+            AssertBitmapsEqual(
+                expected,
+                actual,
+                "repeated overlay removal with changing local backgrounds");
+        }
+        finally
+        {
+            foreach (Bitmap bitmap in frameBitmaps)
+            {
+                bitmap.Dispose();
+            }
+        }
+    }
+
+    private static void RemoveRepeatedFixedOverlaysLeavesDifferentImagesUntouched()
+    {
+        Color[] colors =
+        [
+            Color.FromArgb(232, 82, 52),
+            Color.DodgerBlue,
+            Color.MediumSeaGreen,
+            Color.MediumPurple
+        ];
+        using Bitmap page = CreateOverlayTestPage();
+        List<Bitmap> frameBitmaps = [];
+
+        try
+        {
+            List<CapturedFrame> frames = CreateOverlayTestFrames(
+                page,
+                frameBitmaps,
+                index => colors[index]);
+
+            using Bitmap expected = VerticalStitcher.Stitch(frames, MaximumOutputPixels);
+            using Bitmap actual = VerticalStitcher.Stitch(
+                frames,
+                MaximumOutputPixels,
+                removeRepeatedFixedOverlays: true);
+
+            AssertBitmapsEqual(
+                expected,
+                actual,
+                "different page images must not be mistaken for a repeated overlay");
+        }
+        finally
+        {
+            foreach (Bitmap bitmap in frameBitmaps)
+            {
+                bitmap.Dispose();
+            }
+        }
+    }
+
+    private static void RemoveRepeatedFixedOverlaysRequiresSafeBackground()
+    {
+        using Bitmap page = CreateOverlayTestPage();
+        FillRectangle(page, new Rectangle(202, 221, 3, 33), Color.Gold);
+        List<Bitmap> frameBitmaps = [];
+
+        try
+        {
+            List<CapturedFrame> frames = CreateOverlayTestFrames(
+                page,
+                frameBitmaps,
+                _ => Color.FromArgb(232, 82, 52));
+
+            using Bitmap expected = VerticalStitcher.Stitch(frames, MaximumOutputPixels);
+            using Bitmap actual = VerticalStitcher.Stitch(
+                frames,
+                MaximumOutputPixels,
+                removeRepeatedFixedOverlays: true);
+
+            AssertBitmapsEqual(
+                expected,
+                actual,
+                "overlay removal must stop when any replacement background is unsafe");
+        }
+        finally
+        {
+            foreach (Bitmap bitmap in frameBitmaps)
+            {
+                bitmap.Dispose();
+            }
+        }
+    }
+
+    private static void RepeatedPageIconsFollowingStitchMotionRemainUntouched()
+    {
+        using Bitmap page = CreateOverlayTestPage();
+        Color iconColor = Color.FromArgb(232, 82, 52);
+        for (int y = 129; y < page.Height - 17; y += 100)
+        {
+            DrawTestOverlay(
+                page,
+                new Rectangle(page.Width - 30, y, 17, 17),
+                iconColor);
+        }
+
+        List<Bitmap> frameBitmaps = [];
+        try
+        {
+            List<CapturedFrame> frames = CreateOverlayTestFrames(
+                page,
+                frameBitmaps,
+                getOverlayColor: null);
+
+            using Bitmap expected = VerticalStitcher.Stitch(frames, MaximumOutputPixels);
+            using Bitmap actual = VerticalStitcher.Stitch(
+                frames,
+                MaximumOutputPixels,
+                removeRepeatedFixedOverlays: true);
+
+            AssertBitmapsEqual(
+                expected,
+                actual,
+                "legitimate page icons that move with document content");
+        }
+        finally
+        {
+            foreach (Bitmap bitmap in frameBitmaps)
+            {
+                bitmap.Dispose();
+            }
+        }
     }
 
     private static void CropRightRemovesExpectedPixelsAndPreservesDpi()
@@ -258,6 +405,90 @@ internal static class Program
         using Graphics graphics = Graphics.FromImage(bitmap);
         graphics.Clear(color);
         return bitmap;
+    }
+
+    private static Bitmap CreateOverlayTestPage()
+    {
+        const int width = 240;
+        const int height = 460;
+        Bitmap bitmap = new(width, height, PixelFormat.Format32bppArgb);
+
+        for (int y = 0; y < height; y++)
+        {
+            int backgroundStep = y / 32;
+            Color sideBackground = Color.FromArgb(
+                255,
+                20 + backgroundStep,
+                25 + backgroundStep,
+                39 + backgroundStep);
+
+            for (int x = 0; x < width; x++)
+            {
+                if (x >= 180)
+                {
+                    bitmap.SetPixel(x, y, sideBackground);
+                    continue;
+                }
+
+                bitmap.SetPixel(
+                    x,
+                    y,
+                    Color.FromArgb(
+                        255,
+                        (x * 31 + y * 17 + (y >> 8) * 23) & 0xff,
+                        (x * 7 + y * 47 + (y >> 4) * 13) & 0xff,
+                        (x * 19 + y * 71 + (y >> 7) * 29) & 0xff));
+            }
+        }
+
+        return bitmap;
+    }
+
+    private static List<CapturedFrame> CreateOverlayTestFrames(
+        Bitmap page,
+        List<Bitmap> frameBitmaps,
+        Func<int, Color>? getOverlayColor)
+    {
+        const int viewportHeight = 160;
+        int[] offsets = [0, 100, 200, 300];
+        double scrollRange = page.Height - viewportHeight;
+        double viewSize = viewportHeight * 100.0 / page.Height;
+        List<CapturedFrame> frames = [];
+
+        for (int index = 0; index < offsets.Length; index++)
+        {
+            int offset = offsets[index];
+            Bitmap frame = page.Clone(
+                new Rectangle(0, offset, page.Width, viewportHeight),
+                PixelFormat.Format32bppArgb);
+            if (getOverlayColor is not null)
+            {
+                DrawTestOverlay(frame, getOverlayColor(index));
+            }
+
+            frameBitmaps.Add(frame);
+            frames.Add(new CapturedFrame(
+                frame,
+                offset * 100.0 / scrollRange,
+                viewSize));
+        }
+
+        return frames;
+    }
+
+    private static void DrawTestOverlay(Bitmap frame, Color color)
+    {
+        Rectangle bounds = new(frame.Width - 30, frame.Height - 31, 17, 17);
+        DrawTestOverlay(frame, bounds, color);
+    }
+
+    private static void DrawTestOverlay(Bitmap bitmap, Rectangle bounds, Color color)
+    {
+        FillRectangle(bitmap, bounds, color);
+        FillRectangle(
+            bitmap,
+            new Rectangle(bounds.X + 5, bounds.Y + 5, 7, 7),
+            Color.White);
     }
 
     private static void FillRectangle(Bitmap bitmap, Rectangle rectangle, Color color)
