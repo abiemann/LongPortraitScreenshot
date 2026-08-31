@@ -19,6 +19,23 @@ internal static class NativeMethods
 
     internal static readonly nint HwndTopmost = new(-1);
 
+    internal static bool TryGetAvailablePhysicalMemoryBytes(out ulong availableBytes)
+    {
+        MemoryStatusEx status = new()
+        {
+            Length = checked((uint)Marshal.SizeOf<MemoryStatusEx>())
+        };
+
+        if (GlobalMemoryStatusEx(ref status))
+        {
+            availableBytes = status.AvailablePhysicalMemory;
+            return true;
+        }
+
+        availableBytes = 0;
+        return false;
+    }
+
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool SetWindowPos(
@@ -29,4 +46,22 @@ internal static class NativeMethods
         int width,
         int height,
         uint flags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx buffer);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MemoryStatusEx
+    {
+        internal uint Length;
+        internal uint MemoryLoad;
+        internal ulong TotalPhysicalMemory;
+        internal ulong AvailablePhysicalMemory;
+        internal ulong TotalPageFile;
+        internal ulong AvailablePageFile;
+        internal ulong TotalVirtualMemory;
+        internal ulong AvailableVirtualMemory;
+        internal ulong AvailableExtendedVirtualMemory;
+    }
 }

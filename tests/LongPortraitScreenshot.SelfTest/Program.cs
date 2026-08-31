@@ -15,6 +15,14 @@ internal static class Program
             StitchOverlappingFramesReconstructsOriginal();
             StitchSingleFrameReturnsIndependentClone();
             ExactShiftMeasurementOverridesBiasedScrollEstimate();
+            FixedHeaderDoesNotCreateFalseOverlapAmbiguity();
+            LocalizedFrameChangeDoesNotRejectCorrectSeam();
+            LargeFrameChangeStillFailsVisualValidation();
+            GloballyChangedFrameStillFailsVisualValidation();
+            FourPixelSamplingShoulderDoesNotCreateSecondBasin();
+            OnePixelSparseScrollRetainsEnoughEvidence();
+            TrulyPeriodicContentRemainsAmbiguous();
+            MemoryAssessmentUsesAvailableRamBoundary();
             StandardSizeLimitAcceptsBoundaryAndThrowsTypedAboveIt();
             StandardActualOverflowThrowsMeasuredTypedException();
             SafePortionUsesEveryRemainingWholeRow();
@@ -138,6 +146,359 @@ internal static class Program
 
         Require(measuredShift == actualShift,
             $"Exact seam measurement returned {measuredShift} rows; expected {actualShift} despite biased scroll metadata.");
+    }
+
+    private static void FixedHeaderDoesNotCreateFalseOverlapAmbiguity()
+    {
+        const int width = 300;
+        const int pageHeight = 800;
+        const int viewportHeight = 300;
+        const int actualShift = 195;
+
+        using Bitmap page = CreateSolidBitmap(
+            width,
+            pageHeight,
+            Color.FromArgb(8, 12, 35));
+
+        for (int sectionTop = 0; sectionTop < pageHeight; sectionTop += 170)
+        {
+            FillRectangle(
+                page,
+                new Rectangle(36, sectionTop + 36, 214, 79),
+                Color.FromArgb(18, 25, 52));
+            FillRectangle(
+                page,
+                new Rectangle(51, sectionTop + 49, 174, 5),
+                Color.FromArgb(180, 185, 205));
+            FillRectangle(
+                page,
+                new Rectangle(51, sectionTop + 67, 139, 3),
+                Color.FromArgb(100, 110, 145));
+        }
+
+        using Bitmap firstImage = page.Clone(
+            new Rectangle(0, 0, width, viewportHeight),
+            PixelFormat.Format32bppArgb);
+        using Bitmap secondImage = page.Clone(
+            new Rectangle(0, actualShift, width, viewportHeight),
+            PixelFormat.Format32bppArgb);
+
+        Color headerColor = Color.FromArgb(2, 4, 24);
+        FillRectangle(firstImage, new Rectangle(0, 0, width, 34), headerColor);
+        FillRectangle(secondImage, new Rectangle(0, 0, width, 34), headerColor);
+        FillRectangle(firstImage, new Rectangle(31, 14, 89, 6), Color.FromArgb(220, 225, 240));
+        FillRectangle(secondImage, new Rectangle(31, 14, 89, 6), Color.FromArgb(220, 225, 240));
+
+        double scrollRange = pageHeight - viewportHeight;
+        double viewSize = viewportHeight * 100.0 / pageHeight;
+        CapturedFrame first = new(firstImage, 0, viewSize);
+        CapturedFrame second = new(
+            secondImage,
+            actualShift * 100.0 / scrollRange,
+            viewSize);
+
+        int measuredShift = VerticalStitcher.MeasureVerticalShift(first, second, currentFrameIndex: 1);
+
+        Require(measuredShift == actualShift,
+            $"Fixed browser chrome produced a {measuredShift}-row shift; expected {actualShift}.");
+    }
+
+    private static void LocalizedFrameChangeDoesNotRejectCorrectSeam()
+    {
+        const int width = 300;
+        const int pageHeight = 800;
+        const int viewportHeight = 300;
+        const int actualShift = 195;
+        Rectangle changedRegion = new(35, 18, 220, 8);
+
+        using Bitmap page = CreateDeterministicBitmap(width, pageHeight);
+        FillRectangle(
+            page,
+            new Rectangle(
+                changedRegion.X,
+                actualShift + changedRegion.Y,
+                changedRegion.Width,
+                changedRegion.Height),
+            Color.Black);
+
+        using Bitmap firstImage = page.Clone(
+            new Rectangle(0, 0, width, viewportHeight),
+            PixelFormat.Format32bppArgb);
+        using Bitmap secondImage = page.Clone(
+            new Rectangle(0, actualShift, width, viewportHeight),
+            PixelFormat.Format32bppArgb);
+        FillRectangle(secondImage, changedRegion, Color.White);
+
+        double scrollRange = pageHeight - viewportHeight;
+        double viewSize = viewportHeight * 100.0 / pageHeight;
+        CapturedFrame first = new(firstImage, 0, viewSize);
+        CapturedFrame second = new(
+            secondImage,
+            actualShift * 100.0 / scrollRange,
+            viewSize);
+
+        int measuredShift = VerticalStitcher.MeasureVerticalShift(first, second, currentFrameIndex: 1);
+
+        Require(measuredShift == actualShift,
+            $"A localized frame change produced a {measuredShift}-row shift; expected {actualShift}.");
+    }
+
+    private static void LargeFrameChangeStillFailsVisualValidation()
+    {
+        const int width = 300;
+        const int pageHeight = 800;
+        const int viewportHeight = 300;
+        const int actualShift = 195;
+        Rectangle changedRegion = new(20, 12, 250, 20);
+
+        using Bitmap page = CreateDeterministicBitmap(width, pageHeight);
+        FillRectangle(
+            page,
+            new Rectangle(
+                changedRegion.X,
+                actualShift + changedRegion.Y,
+                changedRegion.Width,
+                changedRegion.Height),
+            Color.Black);
+
+        using Bitmap firstImage = page.Clone(
+            new Rectangle(0, 0, width, viewportHeight),
+            PixelFormat.Format32bppArgb);
+        using Bitmap secondImage = page.Clone(
+            new Rectangle(0, actualShift, width, viewportHeight),
+            PixelFormat.Format32bppArgb);
+        FillRectangle(secondImage, changedRegion, Color.White);
+
+        double scrollRange = pageHeight - viewportHeight;
+        double viewSize = viewportHeight * 100.0 / pageHeight;
+        CapturedFrame first = new(firstImage, 0, viewSize);
+        CapturedFrame second = new(
+            secondImage,
+            actualShift * 100.0 / scrollRange,
+            viewSize);
+
+        InvalidOperationException? failure = null;
+        try
+        {
+            _ = VerticalStitcher.MeasureVerticalShift(first, second, currentFrameIndex: 1);
+        }
+        catch (InvalidOperationException exception)
+        {
+            failure = exception;
+        }
+
+        Require(failure is not null
+            && failure.Message.Contains("too much visual difference", StringComparison.Ordinal),
+            "A large changed region must still fail visual seam validation.");
+    }
+
+    private static void GloballyChangedFrameStillFailsVisualValidation()
+    {
+        const int width = 97;
+        const int pageHeight = 677;
+        const int viewportHeight = 181;
+        const int actualShift = 137;
+
+        using Bitmap page = new(width, pageHeight, PixelFormat.Format32bppArgb);
+        for (int y = 0; y < pageHeight; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                page.SetPixel(
+                    x,
+                    y,
+                    Color.FromArgb(
+                        (x * 31 + y * 17) % 200,
+                        (x * 7 + y * 47) % 200,
+                        (x * 19 + y * 71) % 200));
+            }
+        }
+
+        using Bitmap firstImage = page.Clone(
+            new Rectangle(0, 0, width, viewportHeight),
+            PixelFormat.Format32bppArgb);
+        using Bitmap secondImage = page.Clone(
+            new Rectangle(0, actualShift, width, viewportHeight),
+            PixelFormat.Format32bppArgb);
+        for (int y = 0; y < viewportHeight; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                Color source = secondImage.GetPixel(x, y);
+                secondImage.SetPixel(
+                    x,
+                    y,
+                    Color.FromArgb(source.R + 23, source.G + 23, source.B + 23));
+            }
+        }
+
+        double scrollRange = pageHeight - viewportHeight;
+        double viewSize = viewportHeight * 100.0 / pageHeight;
+        CapturedFrame first = new(firstImage, 0, viewSize);
+        CapturedFrame second = new(
+            secondImage,
+            actualShift * 100.0 / scrollRange,
+            viewSize);
+
+        InvalidOperationException? failure = null;
+        try
+        {
+            _ = VerticalStitcher.MeasureVerticalShift(first, second, currentFrameIndex: 1);
+        }
+        catch (InvalidOperationException exception)
+        {
+            failure = exception;
+        }
+
+        Require(failure is not null
+            && failure.Message.Contains("too much visual difference", StringComparison.Ordinal),
+            "A globally changed frame must still fail visual seam validation.");
+    }
+
+    private static void FourPixelSamplingShoulderDoesNotCreateSecondBasin()
+    {
+        const int width = 97;
+        const int pageHeight = 2_475;
+        const int viewportHeight = 1_500;
+        const int actualShift = 975;
+
+        using Bitmap page = new(width, pageHeight, PixelFormat.Format32bppArgb);
+        for (int y = 0; y < pageHeight; y++)
+        {
+            int gray = y / 10;
+            Color rowColor = Color.FromArgb(gray, gray, gray);
+            for (int x = 0; x < width; x++)
+            {
+                page.SetPixel(x, y, rowColor);
+            }
+        }
+
+        using Bitmap firstImage = page.Clone(
+            new Rectangle(0, 0, width, viewportHeight),
+            PixelFormat.Format32bppArgb);
+        using Bitmap secondImage = page.Clone(
+            new Rectangle(0, actualShift, width, viewportHeight),
+            PixelFormat.Format32bppArgb);
+
+        double scrollRange = pageHeight - viewportHeight;
+        double viewSize = viewportHeight * 100.0 / pageHeight;
+        CapturedFrame first = new(firstImage, 0, viewSize);
+        CapturedFrame second = new(
+            secondImage,
+            actualShift * 100.0 / scrollRange,
+            viewSize);
+
+        int measuredShift = VerticalStitcher.MeasureVerticalShift(first, second, currentFrameIndex: 1);
+
+        Require(measuredShift == actualShift,
+            $"A four-pixel sampling shoulder produced a {measuredShift}-row shift; expected {actualShift}.");
+    }
+
+    private static void OnePixelSparseScrollRetainsEnoughEvidence()
+    {
+        const int width = 97;
+        const int pageHeight = 300;
+        const int viewportHeight = 181;
+        const int actualShift = 1;
+
+        using Bitmap page = CreateSolidBitmap(
+            width,
+            pageHeight,
+            Color.FromArgb(12, 16, 32));
+        FillRectangle(
+            page,
+            new Rectangle(20, 51, 51, 1),
+            Color.FromArgb(210, 220, 240));
+
+        using Bitmap firstImage = page.Clone(
+            new Rectangle(0, 0, width, viewportHeight),
+            PixelFormat.Format32bppArgb);
+        using Bitmap secondImage = page.Clone(
+            new Rectangle(0, actualShift, width, viewportHeight),
+            PixelFormat.Format32bppArgb);
+
+        double scrollRange = pageHeight - viewportHeight;
+        double viewSize = viewportHeight * 100.0 / pageHeight;
+        CapturedFrame first = new(firstImage, 0, viewSize);
+        CapturedFrame second = new(
+            secondImage,
+            actualShift * 100.0 / scrollRange,
+            viewSize);
+
+        int measuredShift = VerticalStitcher.MeasureVerticalShift(first, second, currentFrameIndex: 1);
+
+        Require(measuredShift == actualShift,
+            $"A sparse one-pixel final scroll produced a {measuredShift}-row shift; expected {actualShift}.");
+    }
+
+    private static void TrulyPeriodicContentRemainsAmbiguous()
+    {
+        const int width = 97;
+        const int pageHeight = 800;
+        const int viewportHeight = 300;
+        const int actualShift = 195;
+
+        using Bitmap page = new(width, pageHeight, PixelFormat.Format32bppArgb);
+        for (int y = 0; y < pageHeight; y++)
+        {
+            Color stripeColor = y % 20 < 10
+                ? Color.FromArgb(20, 30, 70)
+                : Color.FromArgb(190, 200, 230);
+            FillRectangle(page, new Rectangle(0, y, width, 1), stripeColor);
+        }
+
+        using Bitmap firstImage = page.Clone(
+            new Rectangle(0, 0, width, viewportHeight),
+            PixelFormat.Format32bppArgb);
+        using Bitmap secondImage = page.Clone(
+            new Rectangle(0, actualShift, width, viewportHeight),
+            PixelFormat.Format32bppArgb);
+
+        double scrollRange = pageHeight - viewportHeight;
+        double viewSize = viewportHeight * 100.0 / pageHeight;
+        CapturedFrame first = new(firstImage, 0, viewSize);
+        CapturedFrame second = new(
+            secondImage,
+            actualShift * 100.0 / scrollRange,
+            viewSize);
+
+        InvalidOperationException? failure = null;
+        try
+        {
+            _ = VerticalStitcher.MeasureVerticalShift(first, second, currentFrameIndex: 1);
+        }
+        catch (InvalidOperationException exception)
+        {
+            failure = exception;
+        }
+
+        Require(failure is not null
+            && failure.Message.Contains("more than one overlap looked equally likely", StringComparison.Ordinal),
+            "Exactly periodic content must remain rejected when several shifts are visually identical.");
+    }
+
+    private static void MemoryAssessmentUsesAvailableRamBoundary()
+    {
+        const ulong availableBytes = 8UL * 1024 * 1024 * 1024;
+        long boundaryPixels = checked((long)(availableBytes / 32));
+        const string prefix = "Given the available amount of RAM, this operation is: ";
+
+        Require(
+            CaptureMemoryAssessment.GetText(boundaryPixels, availableBytes)
+                == prefix + "likely to succeed.",
+            "A capture exactly at the available-RAM boundary should be described as likely to succeed.");
+        Require(
+            CaptureMemoryAssessment.GetText(boundaryPixels + 1, availableBytes)
+                == prefix + "likely to be slow.",
+            "A capture above the available-RAM boundary should be described as likely to be slow.");
+        Require(
+            CaptureMemoryAssessment.GetText(estimatedPixels: 1, availablePhysicalBytes: 0)
+                == prefix + "likely to be slow.",
+            "An unavailable RAM reading should use the conservative slow assessment.");
+        Require(
+            CaptureMemoryAssessment.GetText(long.MaxValue, ulong.MaxValue)
+                == prefix + "likely to be slow.",
+            "The RAM assessment must handle maximum input values without overflow.");
     }
 
     private static void StandardSizeLimitAcceptsBoundaryAndThrowsTypedAboveIt()

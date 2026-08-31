@@ -390,6 +390,7 @@ public sealed class MainForm : Form
     private CaptureMode? ShowOversizedCaptureDialog(CaptureSizeLimitExceededException exception)
     {
         double estimatedBitmapMiB = exception.EstimatedPixels * 4.0 / (1024.0 * 1024.0);
+        string memoryAssessment = CaptureMemoryAssessment.GetCurrentText(exception.EstimatedPixels);
         string sizeFinding = exception.IsEstimate
             ? $"The screenshot is estimated to need {exception.EstimatedPixels:N0} pixels"
             : $"The captured content has already reached {exception.EstimatedPixels:N0} pixels";
@@ -415,7 +416,8 @@ public sealed class MainForm : Form
             Text =
                 $"{sizeFinding}, above the " +
                 $"{exception.SafePixelLimit:N0}-pixel safety limit. A 32-bit bitmap at that size would use about " +
-                $"{estimatedBitmapMiB:N0} MiB, and capture processing needs additional memory."
+                $"{estimatedBitmapMiB:N0} MiB, and capture processing needs additional memory.\n\n" +
+                memoryAssessment
         };
         page.Buttons.Add(fullCaptureButton);
         page.Buttons.Add(safeCaptureButton);

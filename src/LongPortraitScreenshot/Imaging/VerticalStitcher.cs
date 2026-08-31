@@ -8,7 +8,9 @@ namespace LongPortraitScreenshot.Imaging;
 
 public static class VerticalStitcher
 {
-    private const double MaximumAcceptablePixelError = 22.0;
+    private const int MaximumAcceptablePixelError = 22;
+    private const int MaximumPixelErrorContribution = MaximumAcceptablePixelError * 4 * 3;
+    private const int StationaryPixelTolerance = 3;
 
     public static Bitmap Stitch(
         IReadOnlyList<CapturedFrame> frames,
@@ -341,6 +343,29 @@ public static class VerticalStitcher
             throw SeamFailure(currentFrameIndex, "the selected control is too narrow to compare its content reliably");
         }
 
+        int commonOverlap = height - maximumSearchShift;
+        List<(int X, int Y)> movingSamplePoints = FindMovingSamplePoints(
+            previousPixels,
+            currentPixels,
+            commonOverlap,
+            firstX,
+            exclusiveLastX,
+            cancellationToken,
+            out int sampledPointCount,
+            out int verticalSampleStride);
+        double minimumMovingSampleFraction = Math.Min(
+            0.02,
+            (double)predictedShift / height);
+        int minimumMovingSampleCount = Math.Max(
+            12,
+            (int)Math.Ceiling(sampledPointCount * minimumMovingSampleFraction));
+        if (movingSamplePoints.Count < minimumMovingSampleCount)
+        {
+            throw SeamFailure(
+                currentFrameIndex,
+                "the overlap did not contain enough moving visual detail to distinguish it from fixed content");
+        }
+
         int candidateCount = maximumSearchShift - minimumShift + 1;
         double[] scores = new double[candidateCount];
         int bestShift = -1;
@@ -353,8 +378,7 @@ public static class VerticalStitcher
                 previousPixels,
                 currentPixels,
                 shift,
-                firstX,
-                exclusiveLastX,
+                movingSamplePoints,
                 cancellationToken);
             scores[shift - minimumShift] = score;
 
@@ -375,50 +399,83 @@ public static class VerticalStitcher
                 $"the best overlap had too much visual difference (error {bestScore:0.##})");
         }
 
+        double requiredConfidenceGap = Math.Max(0.45, bestScore * 0.08);
+        double sameBasinThreshold = bestScore + requiredConfidenceGap;
+        int sameBasinRadius = Math.Max(3, verticalSampleStride);
+        int bestScoreIndex = bestShift - minimumShift;
+        int firstSameBasinIndex = bestScoreIndex;
+        while (firstSameBasinIndex > 0
+            && bestScoreIndex - firstSameBasinIndex < sameBasinRadius
+            && scores[firstSameBasinIndex - 1] < sameBasinThreshold)
+        {
+            firstSameBasinIndex--;
+        }
+
+        int lastSameBasinIndex = bestScoreIndex;
+        while (lastSameBasinIndex + 1 < scores.Length
+            && lastSameBasinIndex - bestScoreIndex < sameBasinRadius
+            && scores[lastSameBasinIndex + 1] < sameBasinThreshold)
+        {
+            lastSameBasinIndex++;
+        }
+
+        int secondBasinShift = -1;
         double secondBasinScore = double.PositiveInfinity;
-        for (int shift = minimumShift; shift <= maximumSearchShift; shift++)
+        for (int scoreIndex = 0; scoreIndex < scores.Length; scoreIndex++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (Math.Abs(shift - bestShift) <= 3)
+            if (scoreIndex >= firstSameBasinIndex && scoreIndex <= lastSameBasinIndex)
             {
                 continue;
             }
 
-            secondBasinScore = Math.Min(secondBasinScore, scores[shift - minimumShift]);
+            double score = scores[scoreIndex];
+            if (score < secondBasinScore)
+            {
+                secondBasinScore = score;
+                secondBasinShift = minimumShift + scoreIndex;
+            }
         }
 
-        double requiredConfidenceGap = Math.Max(0.45, bestScore * 0.08);
         if (double.IsFinite(secondBasinScore) && secondBasinScore - bestScore < requiredConfidenceGap)
         {
             throw SeamFailure(
                 currentFrameIndex,
-                $"more than one overlap looked equally likely (best error {bestScore:0.##}, alternate {secondBasinScore:0.##})");
+                $"more than one overlap looked equally likely " +
+                $"(best shift {bestShift}px, error {bestScore:0.##}; " +
+                $"alternate shift {secondBasinShift}px, error {secondBasinScore:0.##})");
         }
 
         return bestShift;
     }
 
-    private static double CalculateScore(
+    private static List<(int X, int Y)> FindMovingSamplePoints(
         PixelBuffer previous,
         PixelBuffer current,
-        int shift,
+        int overlap,
         int firstX,
         int exclusiveLastX,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        out int sampledPointCount,
+        out int verticalSampleStride)
     {
-        int overlap = previous.Height - shift;
         int verticalMargin = Math.Min(6, Math.Max(0, overlap / 10));
         int availableRows = overlap - (verticalMargin * 2);
-        if (availableRows <= 0)
+        int availableColumns = exclusiveLastX - firstX;
+        if (availableRows <= 0 || availableColumns <= 0)
         {
-            return double.PositiveInfinity;
+            sampledPointCount = 0;
+            verticalSampleStride = 1;
+            return [];
         }
 
-        int availableColumns = exclusiveLastX - firstX;
         int rowSamples = Math.Min(96, availableRows);
         int columnSamples = Math.Min(80, availableColumns);
-        long totalDifference = 0;
-        int comparedChannels = 0;
+        verticalSampleStride = rowSamples <= 1
+            ? 1
+            : (int)Math.Ceiling((double)(availableRows - 1) / (rowSamples - 1));
+        sampledPointCount = checked(rowSamples * columnSamples);
+        List<(int X, int Y)> movingPoints = new(sampledPointCount);
 
         for (int rowIndex = 0; rowIndex < rowSamples; rowIndex++)
         {
@@ -426,8 +483,7 @@ public static class VerticalStitcher
             int rowOffset = rowSamples == 1
                 ? 0
                 : (int)((long)rowIndex * (availableRows - 1) / (rowSamples - 1));
-            int currentY = verticalMargin + rowOffset;
-            int previousY = currentY + shift;
+            int y = verticalMargin + rowOffset;
 
             for (int columnIndex = 0; columnIndex < columnSamples; columnIndex++)
             {
@@ -435,14 +491,52 @@ public static class VerticalStitcher
                     ? 0
                     : (int)((long)columnIndex * (availableColumns - 1) / (columnSamples - 1));
                 int x = firstX + columnOffset;
+                int previousOffset = previous.GetOffset(x, y);
+                int currentOffset = current.GetOffset(x, y);
+                int largestChannelDifference = Math.Max(
+                    Math.Abs(previous.Pixels[previousOffset] - current.Pixels[currentOffset]),
+                    Math.Max(
+                        Math.Abs(previous.Pixels[previousOffset + 1] - current.Pixels[currentOffset + 1]),
+                        Math.Abs(previous.Pixels[previousOffset + 2] - current.Pixels[currentOffset + 2])));
 
-                int previousOffset = previous.GetOffset(x, previousY);
-                int currentOffset = current.GetOffset(x, currentY);
-                totalDifference += Math.Abs(previous.Pixels[previousOffset] - current.Pixels[currentOffset]);
-                totalDifference += Math.Abs(previous.Pixels[previousOffset + 1] - current.Pixels[currentOffset + 1]);
-                totalDifference += Math.Abs(previous.Pixels[previousOffset + 2] - current.Pixels[currentOffset + 2]);
-                comparedChannels += 3;
+                if (largestChannelDifference > StationaryPixelTolerance)
+                {
+                    movingPoints.Add((x, y));
+                }
             }
+        }
+
+        return movingPoints;
+    }
+
+    private static double CalculateScore(
+        PixelBuffer previous,
+        PixelBuffer current,
+        int shift,
+        IReadOnlyList<(int X, int Y)> samplePoints,
+        CancellationToken cancellationToken)
+    {
+        long totalDifference = 0;
+        int comparedChannels = 0;
+
+        for (int index = 0; index < samplePoints.Count; index++)
+        {
+            if ((index & 63) == 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+
+            (int x, int currentY) = samplePoints[index];
+            int previousOffset = previous.GetOffset(x, currentY + shift);
+            int currentOffset = current.GetOffset(x, currentY);
+            int pixelDifference =
+                Math.Abs(previous.Pixels[previousOffset] - current.Pixels[currentOffset]) +
+                Math.Abs(previous.Pixels[previousOffset + 1] - current.Pixels[currentOffset + 1]) +
+                Math.Abs(previous.Pixels[previousOffset + 2] - current.Pixels[currentOffset + 2]);
+
+            // Keep a small animated or lazy-loaded region from dominating an otherwise exact seam.
+            totalDifference += Math.Min(pixelDifference, MaximumPixelErrorContribution);
+            comparedChannels += 3;
         }
 
         return comparedChannels == 0
