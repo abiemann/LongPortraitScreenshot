@@ -15,6 +15,12 @@ Open `LongPortraitScreenshot.sln` in Visual Studio and build the solution, or ru
 dotnet build .\LongPortraitScreenshot.sln
 ```
 
+To run the dependency-free self-tests:
+
+```powershell
+dotnet run --project .\tests\LongPortraitScreenshot.SelfTest\LongPortraitScreenshot.SelfTest.csproj
+```
+
 ## Use
 
 1. Open the window containing the scrollable content and leave it unobscured.
@@ -25,3 +31,19 @@ dotnet build .\LongPortraitScreenshot.sln
 The scrollbar-crop and horizontal-empty-space trim options are enabled by default and remembered for each Windows user. Horizontal trimming keeps a 5-pixel margin beside detected content.
 
 The first release supports vertical UI Automation scroll containers. Elevated, protected, minimized, moving, dynamically changing, or non-UI-Automation controls may not be capturable.
+
+## Project structure
+
+```text
+LongPortraitScreenshot.sln
+src/
+  LongPortraitScreenshot/
+    Automation/     UI Automation target discovery and access
+    Capture/        Capture and scrolling workflow, options, and results
+    Configuration/  Per-user application settings
+    Imaging/        Screen capture, stitching, and image cropping
+    Interop/         Native Windows APIs
+    UI/              Windows Forms user interface
+tests/
+  LongPortraitScreenshot.SelfTest/  Dependency-free regression tests
+```

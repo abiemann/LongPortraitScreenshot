@@ -5,7 +5,7 @@ using DrawingRectangle = System.Drawing.Rectangle;
 using UiaPoint = System.Windows.Point;
 using UiaRectangle = System.Windows.Rect;
 
-namespace LongPortraitScreenshot;
+namespace LongPortraitScreenshot.Automation;
 
 internal static class TargetResolver
 {

@@ -16,4 +16,8 @@
     <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="LongPortraitScreenshot.SelfTest" />
+  </ItemGroup>
+
 </Project>

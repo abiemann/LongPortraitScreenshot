@@ -1,7 +1,7 @@
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 
-namespace LongPortraitScreenshot;
+namespace LongPortraitScreenshot.Imaging;
 
 internal static class EmptySpaceCropper
 {

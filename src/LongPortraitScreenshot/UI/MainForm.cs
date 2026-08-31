@@ -1,6 +1,9 @@
 using System.Drawing.Imaging;
+using LongPortraitScreenshot.Automation;
+using LongPortraitScreenshot.Capture;
+using LongPortraitScreenshot.Configuration;
 
-namespace LongPortraitScreenshot;
+namespace LongPortraitScreenshot.UI;
 
 public sealed class MainForm : Form
 {

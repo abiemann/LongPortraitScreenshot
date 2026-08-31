@@ -1,7 +1,7 @@
 using System.ComponentModel;
 using System.Drawing.Drawing2D;
 
-namespace LongPortraitScreenshot;
+namespace LongPortraitScreenshot.UI;
 
 internal sealed class FinderEventArgs(Point screenPoint) : EventArgs
 {

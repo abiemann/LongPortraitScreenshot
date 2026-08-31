@@ -1,4 +1,6 @@
-namespace LongPortraitScreenshot;
+using LongPortraitScreenshot.Interop;
+
+namespace LongPortraitScreenshot.UI;
 
 internal sealed class TargetOverlay : IDisposable
 {

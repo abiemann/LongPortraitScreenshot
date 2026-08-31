@@ -1,6 +1,6 @@
 using System.Runtime.InteropServices;
 
-namespace LongPortraitScreenshot;
+namespace LongPortraitScreenshot.Interop;
 
 internal static class NativeMethods
 {

@@ -1,15 +1,10 @@
 using System.Drawing;
-using System.Runtime.CompilerServices;
 
-[assembly: InternalsVisibleTo("LongPortraitScreenshot.SelfTest")]
-
-namespace LongPortraitScreenshot;
+namespace LongPortraitScreenshot.Capture;
 
 public sealed record CaptureOptions(
     bool CropVerticalScrollIndicator,
     bool TrimEmptyHorizontalSpace);
-
-public sealed record CapturedFrame(Bitmap Image, double ScrollPercent, double ViewSize);
 
 public sealed class CaptureResult : IDisposable
 {

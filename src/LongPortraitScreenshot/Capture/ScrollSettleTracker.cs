@@ -1,4 +1,4 @@
-namespace LongPortraitScreenshot;
+namespace LongPortraitScreenshot.Capture;
 
 internal sealed class ScrollSettleTracker
 {

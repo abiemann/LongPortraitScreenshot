@@ -1,5 +1,6 @@
 using System.Drawing.Imaging;
-using LongPortraitScreenshot;
+using LongPortraitScreenshot.Capture;
+using LongPortraitScreenshot.Imaging;
 
 namespace LongPortraitScreenshot.SelfTest;
 

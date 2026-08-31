@@ -1,3 +1,5 @@
+using LongPortraitScreenshot.UI;
+
 namespace LongPortraitScreenshot;
 
 internal static class Program

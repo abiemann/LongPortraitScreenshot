@@ -1,7 +1,7 @@
 using System.Security;
 using System.Text.Json;
 
-namespace LongPortraitScreenshot;
+namespace LongPortraitScreenshot.Configuration;
 
 internal sealed class AppSettings
 {

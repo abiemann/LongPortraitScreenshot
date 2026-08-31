@@ -1,6 +1,6 @@
 using System.Windows.Automation;
 
-namespace LongPortraitScreenshot;
+namespace LongPortraitScreenshot.Automation;
 
 internal sealed class ScrollTarget
 {

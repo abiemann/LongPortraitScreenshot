@@ -5,8 +5,10 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Automation;
 using System.Windows.Forms;
+using LongPortraitScreenshot.Automation;
+using LongPortraitScreenshot.Imaging;
 
-namespace LongPortraitScreenshot;
+namespace LongPortraitScreenshot.Capture;
 
 internal static class CaptureSession
 {

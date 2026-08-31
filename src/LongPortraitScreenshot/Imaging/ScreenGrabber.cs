@@ -4,7 +4,7 @@ using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
-namespace LongPortraitScreenshot;
+namespace LongPortraitScreenshot.Imaging;
 
 public static class ScreenGrabber
 {

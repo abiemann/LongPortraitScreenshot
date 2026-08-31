@@ -9,7 +9,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\LongPortraitScreenshot.csproj" />
+    <ProjectReference Include="..\..\src\LongPortraitScreenshot\LongPortraitScreenshot.csproj" />
   </ItemGroup>
 
 </Project>
