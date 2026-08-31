@@ -15,7 +15,6 @@ internal static class CaptureSession
     private const int EscapeVirtualKey = 0x1B;
     private const int MaximumFrames = 256;
     private const long MaximumRawFramePixels = 100_000_000;
-    private const long MaximumOutputPixels = 40_000_000;
     private const double BottomScrollPercent = 99.95;
     private const double MinimumMovementPercent = 0.0001;
     private const int BoundsTolerancePixels = 2;
@@ -41,7 +40,11 @@ internal static class CaptureSession
         {
             try
             {
-                result = CaptureCore(target, options, cancellationToken);
+                using CancellationTokenSource captureCancellation =
+                    CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                using System.Threading.Timer escapeMonitor =
+                    StartEscapeCancellationMonitor(captureCancellation);
+                result = CaptureCore(target, options, captureCancellation.Token);
             }
             catch (Exception exception)
             {
@@ -72,6 +75,7 @@ internal static class CaptureSession
         Point originalCursor = Cursor.Position;
         ScrollState originalScroll = default;
         bool haveOriginalScroll = false;
+        bool scrollMayHaveChanged = false;
         bool useIncrementalScrolling = false;
 
         try
@@ -98,9 +102,10 @@ internal static class CaptureSession
 
             Rectangle captureBounds = ReadVisibleBounds(target.Element);
             EnsureBoundsStable(resolvedBounds, captureBounds);
-            EnsureEstimatedOutputFits(captureBounds, originalScroll.VerticalViewSize);
+            EnsureCaptureModeCanStart(captureBounds, originalScroll.VerticalViewSize, options.Mode);
 
             Cursor.Position = FindParkingPoint(captureBounds);
+            scrollMayHaveChanged = true;
             ScrollState currentScroll = MoveToScrollPercent(
                 target.ScrollPattern,
                 originalScroll,
@@ -119,7 +124,11 @@ internal static class CaptureSession
             }
 
             List<CapturedFrame> frames = [];
+            List<int> measuredVerticalShifts = [];
             long rawFramePixels = 0;
+            long measuredStitchedHeight = captureBounds.Height;
+            bool isPartial = false;
+            int? finalFrameRowsToAppend = null;
             Bitmap? stitched = null;
 
             try
@@ -133,18 +142,41 @@ internal static class CaptureSession
 
                     if (frames.Count >= MaximumFrames)
                     {
+                        if (CaptureSizePolicy.ShouldReturnPartialAtCaptureGuard(
+                            options.Mode,
+                            frames.Count))
+                        {
+                            isPartial = true;
+                            break;
+                        }
+
                         throw new InvalidOperationException(
-                            $"Capture stopped after {MaximumFrames} frames to protect memory. " +
+                            $"Capture stopped after {MaximumFrames} frames to prevent a runaway scroll. " +
                             "Select a shorter scrolling region and try again.");
                     }
 
-                    long framePixels = checked((long)captureBounds.Width * captureBounds.Height);
-                    rawFramePixels = checked(rawFramePixels + framePixels);
-                    if (rawFramePixels > MaximumRawFramePixels)
+                    if (options.Mode != CaptureMode.Full)
                     {
-                        throw new InvalidOperationException(
-                            $"Capture would exceed the {MaximumRawFramePixels:N0}-pixel working-memory safety limit. " +
-                            "Select a narrower or shorter scrolling region.");
+                        long framePixels = CaptureSizePolicy.CalculatePixelCount(
+                            captureBounds.Width,
+                            captureBounds.Height);
+                        long prospectiveRawPixels = checked(rawFramePixels + framePixels);
+                        if (prospectiveRawPixels > MaximumRawFramePixels)
+                        {
+                            if (CaptureSizePolicy.ShouldReturnPartialAtCaptureGuard(
+                                options.Mode,
+                                frames.Count))
+                            {
+                                isPartial = true;
+                                break;
+                            }
+
+                            throw new InvalidOperationException(
+                                $"Capture would exceed the {MaximumRawFramePixels:N0}-pixel working-memory safety limit. " +
+                                "Select a narrower or shorter scrolling region.");
+                        }
+
+                        rawFramePixels = prospectiveRawPixels;
                     }
 
                     Bitmap image = ScreenGrabber.Capture(captureBounds);
@@ -152,10 +184,66 @@ internal static class CaptureSession
                     {
                         Rectangle afterCaptureBounds = ReadVisibleBounds(target.Element);
                         EnsureBoundsStable(captureBounds, afterCaptureBounds);
-                        frames.Add(new CapturedFrame(
+                        CapturedFrame capturedFrame = new(
                             image,
                             currentScroll.VerticalScrollPercent,
-                            currentScroll.VerticalViewSize));
+                            currentScroll.VerticalViewSize);
+
+                        bool stopAfterFrame = false;
+                        int? retainedShift = null;
+                        if (options.Mode != CaptureMode.Full && frames.Count > 0)
+                        {
+                            int addedRows = VerticalStitcher.MeasureVerticalShift(
+                                frames[^1],
+                                capturedFrame,
+                                frames.Count,
+                                cancellationToken);
+                            retainedShift = addedRows;
+
+                            if (options.Mode == CaptureMode.Standard)
+                            {
+                                long candidateHeight = checked(measuredStitchedHeight + addedRows);
+                                long candidatePixels = CaptureSizePolicy.CalculatePixelCount(
+                                    captureBounds.Width,
+                                    candidateHeight);
+                                CaptureSizePolicy.EnsureStandardActualFits(candidatePixels);
+                                measuredStitchedHeight = candidateHeight;
+                            }
+                            else
+                            {
+                                int acceptedRows = CaptureSizePolicy.GetSafeRowsToAppend(
+                                    captureBounds.Width,
+                                    measuredStitchedHeight,
+                                    addedRows,
+                                    out long acceptedHeight,
+                                    out _);
+                                if (acceptedRows == 0)
+                                {
+                                    image.Dispose();
+                                    isPartial = true;
+                                    break;
+                                }
+
+                                measuredStitchedHeight = acceptedHeight;
+                                if (acceptedRows < addedRows)
+                                {
+                                    finalFrameRowsToAppend = acceptedRows;
+                                    isPartial = true;
+                                    stopAfterFrame = true;
+                                }
+                            }
+                        }
+
+                        frames.Add(capturedFrame);
+                        if (retainedShift is int shift)
+                        {
+                            measuredVerticalShifts.Add(shift);
+                        }
+
+                        if (stopAfterFrame)
+                        {
+                            break;
+                        }
                     }
                     catch
                     {
@@ -196,29 +284,41 @@ internal static class CaptureSession
                 }
 
                 ThrowIfCancelled(cancellationToken);
+                CancellationToken processingToken = cancellationToken;
+
                 stitched = VerticalStitcher.Stitch(
                     frames,
-                    MaximumOutputPixels,
-                    options.RemoveRepeatedFixedOverlays);
+                    options.Mode == CaptureMode.Full
+                        ? long.MaxValue
+                        : CaptureSizePolicy.SafePixelLimit,
+                    options.RemoveRepeatedFixedOverlays,
+                    processingToken,
+                    finalFrameRowsToAppend,
+                    options.Mode == CaptureMode.Full ? null : measuredVerticalShifts);
                 if (options.CropVerticalScrollIndicator)
                 {
+                    processingToken.ThrowIfCancellationRequested();
                     int scrollBarWidth = ScrollbarCropper.GetVerticalScrollBarWidth(captureBounds);
                     Bitmap cropped = ScrollbarCropper.CropRight(stitched, scrollBarWidth);
                     stitched.Dispose();
                     stitched = cropped;
+                    processingToken.ThrowIfCancellationRequested();
                 }
 
                 if (options.TrimEmptyHorizontalSpace)
                 {
-                    Bitmap cropped = EmptySpaceCropper.Trim(stitched);
+                    Bitmap cropped = EmptySpaceCropper.Trim(stitched, processingToken);
                     stitched.Dispose();
                     stitched = cropped;
                 }
 
+                processingToken.ThrowIfCancellationRequested();
+
                 CaptureResult result = new(
                     stitched,
                     string.IsNullOrWhiteSpace(target.DisplayName) ? "Scrolling control" : target.DisplayName,
-                    frames.Count);
+                    frames.Count,
+                    isPartial);
                 stitched = null;
                 return result;
             }
@@ -233,7 +333,7 @@ internal static class CaptureSession
         }
         finally
         {
-            if (haveOriginalScroll)
+            if (haveOriginalScroll && scrollMayHaveChanged)
             {
                 try
                 {
@@ -615,21 +715,65 @@ internal static class CaptureSession
         }
     }
 
-    private static void EnsureEstimatedOutputFits(Rectangle bounds, double viewSize)
+    internal static void EnsureCaptureModeCanStart(
+        Rectangle bounds,
+        double viewSize,
+        CaptureMode mode)
+    {
+        switch (mode)
+        {
+            case CaptureMode.Standard:
+                long firstFramePixels = CaptureSizePolicy.CalculatePixelCount(
+                    bounds.Width,
+                    bounds.Height);
+                CaptureSizePolicy.EnsureStandardEstimateFits(firstFramePixels);
+
+                long estimatedPixels = EstimateOutputPixels(bounds, viewSize);
+                if (estimatedPixels >= 0)
+                {
+                    CaptureSizePolicy.EnsureStandardEstimateFits(estimatedPixels);
+                }
+
+                break;
+
+            case CaptureMode.SafePortion:
+                long safeFirstFramePixels = CaptureSizePolicy.CalculatePixelCount(
+                    bounds.Width,
+                    bounds.Height);
+                if (!CaptureSizePolicy.FitsWithinSafeLimit(safeFirstFramePixels))
+                {
+                    throw new CaptureSizeLimitExceededException(
+                        safeFirstFramePixels,
+                        CaptureSizePolicy.SafePixelLimit);
+                }
+
+                break;
+
+            case CaptureMode.Full:
+                break;
+
+            default:
+                throw new ArgumentOutOfRangeException(nameof(mode), mode, "Unknown capture mode.");
+        }
+    }
+
+    internal static long EstimateOutputPixels(Rectangle bounds, double viewSize)
     {
         if (viewSize <= 0.0 || viewSize >= 100.0 || !double.IsFinite(viewSize))
         {
-            return;
+            return -1;
         }
 
-        long estimatedHeight = checked((long)Math.Ceiling(bounds.Height * 100.0 / viewSize));
-        long estimatedPixels = checked(estimatedHeight * bounds.Width);
-        if (estimatedPixels > MaximumOutputPixels)
+        double estimatedHeightValue = Math.Ceiling(bounds.Height * 100.0 / viewSize);
+        if (!double.IsFinite(estimatedHeightValue)
+            || estimatedHeightValue > long.MaxValue
+            || estimatedHeightValue > long.MaxValue / (double)bounds.Width)
         {
-            throw new InvalidOperationException(
-                $"The complete screenshot is estimated at {estimatedPixels:N0} pixels, exceeding the " +
-                $"{MaximumOutputPixels:N0}-pixel safety limit. Select a narrower or shorter scrolling control.");
+            return long.MaxValue;
         }
+
+        long estimatedHeight = checked((long)estimatedHeightValue);
+        return CaptureSizePolicy.CalculatePixelCount(bounds.Width, estimatedHeight);
     }
 
     private static Point FindParkingPoint(Rectangle captureBounds)
@@ -652,6 +796,31 @@ internal static class CaptureSession
         }
 
         return Cursor.Position;
+    }
+
+    private static System.Threading.Timer StartEscapeCancellationMonitor(
+        CancellationTokenSource cancellation)
+    {
+        return new System.Threading.Timer(
+            _ =>
+            {
+                if ((GetAsyncKeyState(EscapeVirtualKey) & 0x8000) == 0)
+                {
+                    return;
+                }
+
+                try
+                {
+                    cancellation.Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                    // A queued timer callback may finish after the processing scope exits.
+                }
+            },
+            state: null,
+            dueTime: 0,
+            period: ScrollPollMilliseconds);
     }
 
     private static void ThrowIfCancelled(

@@ -2,6 +2,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace LongPortraitScreenshot.Imaging;
 
@@ -12,9 +13,50 @@ public static class VerticalStitcher
     public static Bitmap Stitch(
         IReadOnlyList<CapturedFrame> frames,
         long maxPixels = 40_000_000,
-        bool removeRepeatedFixedOverlays = false)
+        bool removeRepeatedFixedOverlays = false) =>
+        Stitch(
+            frames,
+            maxPixels,
+            removeRepeatedFixedOverlays,
+            CancellationToken.None,
+            finalFrameRowsToAppend: null);
+
+    public static Bitmap Stitch(
+        IReadOnlyList<CapturedFrame> frames,
+        long maxPixels,
+        bool removeRepeatedFixedOverlays,
+        CancellationToken cancellationToken) =>
+        Stitch(
+            frames,
+            maxPixels,
+            removeRepeatedFixedOverlays,
+            cancellationToken,
+            finalFrameRowsToAppend: null);
+
+    internal static Bitmap Stitch(
+        IReadOnlyList<CapturedFrame> frames,
+        long maxPixels,
+        bool removeRepeatedFixedOverlays,
+        CancellationToken cancellationToken,
+        int? finalFrameRowsToAppend) =>
+        Stitch(
+            frames,
+            maxPixels,
+            removeRepeatedFixedOverlays,
+            cancellationToken,
+            finalFrameRowsToAppend,
+            measuredVerticalShifts: null);
+
+    internal static Bitmap Stitch(
+        IReadOnlyList<CapturedFrame> frames,
+        long maxPixels,
+        bool removeRepeatedFixedOverlays,
+        CancellationToken cancellationToken,
+        int? finalFrameRowsToAppend,
+        IReadOnlyList<int>? measuredVerticalShifts)
     {
         ArgumentNullException.ThrowIfNull(frames);
+        cancellationToken.ThrowIfCancellationRequested();
 
         if (frames.Count == 0)
         {
@@ -26,20 +68,63 @@ public static class VerticalStitcher
             throw new ArgumentOutOfRangeException(nameof(maxPixels), "The output pixel limit must be positive.");
         }
 
-        (int width, int height) = ValidateFrames(frames);
+        (int width, int height) = ValidateFrames(frames, cancellationToken);
+        if (measuredVerticalShifts is not null
+            && measuredVerticalShifts.Count != frames.Count - 1)
+        {
+            throw new ArgumentException(
+                "The retained vertical-shift count must be one less than the captured frame count.",
+                nameof(measuredVerticalShifts));
+        }
+
         if (frames.Count == 1)
         {
+            if (finalFrameRowsToAppend is not null)
+            {
+                throw new ArgumentException(
+                    "A partial final append requires at least two captured frames.",
+                    nameof(finalFrameRowsToAppend));
+            }
+
             EnsureOutputFits(width, height, maxPixels);
-            return CloneAsArgb(frames[0].Image);
+            return CloneAsArgb(frames[0].Image, cancellationToken);
         }
 
         int[] shifts = new int[frames.Count - 1];
+        int[] rowsToAppend = new int[frames.Count - 1];
         long outputHeight = height;
 
         for (int index = 1; index < frames.Count; index++)
         {
-            shifts[index - 1] = FindVerticalShift(frames[index - 1], frames[index], index, width, height);
-            outputHeight = checked(outputHeight + shifts[index - 1]);
+            cancellationToken.ThrowIfCancellationRequested();
+            int shift = measuredVerticalShifts is null
+                ? MeasureVerticalShift(
+                    frames[index - 1],
+                    frames[index],
+                    index,
+                    cancellationToken)
+                : measuredVerticalShifts[index - 1];
+            int maximumMeasuredShift = height - Math.Max(24, height / 8);
+            if (shift <= 0 || shift > maximumMeasuredShift)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(measuredVerticalShifts),
+                    $"Retained shift {index} is outside the supported overlap range.");
+            }
+
+            int appendRows = index == frames.Count - 1 && finalFrameRowsToAppend is int requestedRows
+                ? requestedRows
+                : shift;
+            if (appendRows <= 0 || appendRows > shift)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(finalFrameRowsToAppend),
+                    "The partial append must contain at least one row and cannot exceed the measured shift.");
+            }
+
+            shifts[index - 1] = shift;
+            rowsToAppend[index - 1] = appendRows;
+            outputHeight = checked(outputHeight + appendRows);
             EnsureOutputFits(width, outputHeight, maxPixels);
         }
 
@@ -69,12 +154,14 @@ public static class VerticalStitcher
                 graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
                 graphics.PixelOffsetMode = PixelOffsetMode.None;
                 graphics.DrawImageUnscaled(frames[0].Image, 0, 0);
+                cancellationToken.ThrowIfCancellationRequested();
 
                 int destinationY = height;
                 for (int index = 1; index < frames.Count; index++)
                 {
-                    int newRows = shifts[index - 1];
-                    int sourceY = height - newRows;
+                    cancellationToken.ThrowIfCancellationRequested();
+                    int newRows = rowsToAppend[index - 1];
+                    int sourceY = height - shifts[index - 1];
                     graphics.DrawImage(
                         frames[index].Image,
                         new Rectangle(0, destinationY, width, newRows),
@@ -87,11 +174,36 @@ public static class VerticalStitcher
                 }
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             if (removeRepeatedFixedOverlays)
             {
-                RepeatedOverlayRemover.Remove(output, height, shifts, frames);
+                IReadOnlyList<int> overlayShifts = shifts;
+                IReadOnlyList<CapturedFrame> overlayFrames = frames;
+                if (finalFrameRowsToAppend is not null)
+                {
+                    int fullTransitionCount = shifts.Length - 1;
+                    int[] fullShifts = new int[fullTransitionCount];
+                    CapturedFrame[] fullFrames = new CapturedFrame[fullTransitionCount + 1];
+                    Array.Copy(shifts, fullShifts, fullTransitionCount);
+                    for (int index = 0; index < fullFrames.Length; index++)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        fullFrames[index] = frames[index];
+                    }
+
+                    overlayShifts = fullShifts;
+                    overlayFrames = fullFrames;
+                }
+
+                RepeatedOverlayRemover.Remove(
+                    output,
+                    height,
+                    overlayShifts,
+                    overlayFrames,
+                    cancellationToken);
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             return output;
         }
         catch
@@ -101,7 +213,9 @@ public static class VerticalStitcher
         }
     }
 
-    private static (int Width, int Height) ValidateFrames(IReadOnlyList<CapturedFrame> frames)
+    private static (int Width, int Height) ValidateFrames(
+        IReadOnlyList<CapturedFrame> frames,
+        CancellationToken cancellationToken)
     {
         CapturedFrame first = frames[0]
             ?? throw new ArgumentException("Captured frames cannot contain null entries.", nameof(frames));
@@ -117,6 +231,7 @@ public static class VerticalStitcher
 
         for (int index = 0; index < frames.Count; index++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             CapturedFrame frame = frames[index]
                 ?? throw new ArgumentException($"Captured frame {index + 1} is null.", nameof(frames));
 
@@ -137,13 +252,52 @@ public static class VerticalStitcher
         return (width, height);
     }
 
-    private static int FindVerticalShift(
+    internal static int MeasureVerticalShift(
+        CapturedFrame previous,
+        CapturedFrame current,
+        int currentFrameIndex) =>
+        MeasureVerticalShift(
+            previous,
+            current,
+            currentFrameIndex,
+            CancellationToken.None);
+
+    internal static int MeasureVerticalShift(
         CapturedFrame previous,
         CapturedFrame current,
         int currentFrameIndex,
-        int width,
-        int height)
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (currentFrameIndex < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(currentFrameIndex));
+        }
+
+        ArgumentNullException.ThrowIfNull(previous);
+        ArgumentNullException.ThrowIfNull(current);
+        ArgumentNullException.ThrowIfNull(previous.Image);
+        ArgumentNullException.ThrowIfNull(current.Image);
+
+        int width = previous.Image.Width;
+        int height = previous.Image.Height;
+        if (current.Image.Width != width || current.Image.Height != height)
+        {
+            throw new InvalidOperationException(
+                $"The selected control changed size between frames {currentFrameIndex} and " +
+                $"{currentFrameIndex + 1}. Keep the window stationary and retry.");
+        }
+
+        if (!double.IsFinite(previous.ScrollPercent)
+            || !double.IsFinite(current.ScrollPercent)
+            || !double.IsFinite(previous.ViewSize)
+            || !double.IsFinite(current.ViewSize))
+        {
+            throw SeamFailure(
+                currentFrameIndex,
+                "the target reported invalid scroll information");
+        }
+
         double percentDelta = current.ScrollPercent - previous.ScrollPercent;
         double viewSize = (previous.ViewSize + current.ViewSize) / 2.0;
 
@@ -176,8 +330,8 @@ public static class VerticalStitcher
         int minimumShift = Math.Max(1, predictedShift - searchRadius);
         int maximumSearchShift = Math.Min(maximumShift, predictedShift + searchRadius);
 
-        PixelBuffer previousPixels = PixelBuffer.Create(previous.Image);
-        PixelBuffer currentPixels = PixelBuffer.Create(current.Image);
+        PixelBuffer previousPixels = PixelBuffer.Create(previous.Image, cancellationToken);
+        PixelBuffer currentPixels = PixelBuffer.Create(current.Image, cancellationToken);
 
         int ignoredRightPixels = Math.Min(Math.Max(18, width / 40), Math.Max(0, width / 4));
         int firstX = Math.Min(3, Math.Max(0, width - 1));
@@ -194,12 +348,14 @@ public static class VerticalStitcher
 
         for (int shift = minimumShift; shift <= maximumSearchShift; shift++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             double score = CalculateScore(
                 previousPixels,
                 currentPixels,
                 shift,
                 firstX,
-                exclusiveLastX);
+                exclusiveLastX,
+                cancellationToken);
             scores[shift - minimumShift] = score;
 
             bool isBetter = score < bestScore - 0.0001;
@@ -222,6 +378,7 @@ public static class VerticalStitcher
         double secondBasinScore = double.PositiveInfinity;
         for (int shift = minimumShift; shift <= maximumSearchShift; shift++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (Math.Abs(shift - bestShift) <= 3)
             {
                 continue;
@@ -246,7 +403,8 @@ public static class VerticalStitcher
         PixelBuffer current,
         int shift,
         int firstX,
-        int exclusiveLastX)
+        int exclusiveLastX,
+        CancellationToken cancellationToken)
     {
         int overlap = previous.Height - shift;
         int verticalMargin = Math.Min(6, Math.Max(0, overlap / 10));
@@ -264,6 +422,7 @@ public static class VerticalStitcher
 
         for (int rowIndex = 0; rowIndex < rowSamples; rowIndex++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             int rowOffset = rowSamples == 1
                 ? 0
                 : (int)((long)rowIndex * (availableRows - 1) / (rowSamples - 1));
@@ -318,13 +477,23 @@ public static class VerticalStitcher
         }
     }
 
-    private static Bitmap CloneAsArgb(Bitmap source)
+    private static Bitmap CloneAsArgb(Bitmap source, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         Bitmap clone = new(source.Width, source.Height, PixelFormat.Format32bppArgb);
-        using Graphics graphics = Graphics.FromImage(clone);
-        graphics.CompositingMode = CompositingMode.SourceCopy;
-        graphics.DrawImageUnscaled(source, 0, 0);
-        return clone;
+        try
+        {
+            using Graphics graphics = Graphics.FromImage(clone);
+            graphics.CompositingMode = CompositingMode.SourceCopy;
+            graphics.DrawImageUnscaled(source, 0, 0);
+            cancellationToken.ThrowIfCancellationRequested();
+            return clone;
+        }
+        catch
+        {
+            clone.Dispose();
+            throw;
+        }
     }
 
     private sealed class PixelBuffer
@@ -344,9 +513,9 @@ public static class VerticalStitcher
 
         public int GetOffset(int x, int y) => ((y * Width) + x) * 4;
 
-        public static PixelBuffer Create(Bitmap source)
+        public static PixelBuffer Create(Bitmap source, CancellationToken cancellationToken)
         {
-            using Bitmap normalized = CloneAsArgb(source);
+            using Bitmap normalized = CloneAsArgb(source, cancellationToken);
             Rectangle bounds = new(0, 0, normalized.Width, normalized.Height);
             BitmapData data = normalized.LockBits(bounds, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
 
@@ -356,6 +525,7 @@ public static class VerticalStitcher
                 byte[] pixels = new byte[checked(rowBytes * normalized.Height)];
                 for (int y = 0; y < normalized.Height; y++)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     IntPtr sourceRow = IntPtr.Add(data.Scan0, y * data.Stride);
                     Marshal.Copy(sourceRow, pixels, y * rowBytes, rowBytes);
                 }

@@ -1,5 +1,6 @@
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace LongPortraitScreenshot.Imaging;
 
@@ -7,9 +8,10 @@ internal static class EmptySpaceCropper
 {
     private const int BackgroundMarginPixels = 5;
 
-    public static Bitmap Trim(Bitmap source)
+    public static Bitmap Trim(Bitmap source, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
+        cancellationToken.ThrowIfCancellationRequested();
 
         Bitmap? converted = null;
         Bitmap scanSource = source;
@@ -25,10 +27,10 @@ internal static class EmptySpaceCropper
 
         try
         {
-            HorizontalContentBounds bounds = FindContentBounds(scanSource);
+            HorizontalContentBounds bounds = FindContentBounds(scanSource, cancellationToken);
             if (!bounds.HasContent)
             {
-                return CopyRegion(scanSource, left: 0, scanSource.Width);
+                return CopyRegion(scanSource, left: 0, scanSource.Width, cancellationToken);
             }
 
             int left = Math.Max(0, bounds.FirstDifferentFromLeft - BackgroundMarginPixels);
@@ -38,10 +40,10 @@ internal static class EmptySpaceCropper
 
             if (left > right)
             {
-                return CopyRegion(scanSource, left: 0, scanSource.Width);
+                return CopyRegion(scanSource, left: 0, scanSource.Width, cancellationToken);
             }
 
-            return CopyRegion(scanSource, left, right - left + 1);
+            return CopyRegion(scanSource, left, right - left + 1, cancellationToken);
         }
         finally
         {
@@ -49,8 +51,11 @@ internal static class EmptySpaceCropper
         }
     }
 
-    private static HorizontalContentBounds FindContentBounds(Bitmap source)
+    private static HorizontalContentBounds FindContentBounds(
+        Bitmap source,
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         Rectangle rectangle = new(0, 0, source.Width, source.Height);
         BitmapData? data = null;
 
@@ -63,18 +68,20 @@ internal static class EmptySpaceCropper
 
             for (int y = 0; y < source.Height; y++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 Marshal.Copy(GetRowAddress(data, y), row, 0, row.Length);
                 CountColor(leftFrequencies, row[0], y);
                 CountColor(rightFrequencies, row[^1], y);
             }
 
-            int leftBackground = FindDominantColor(leftFrequencies);
-            int rightBackground = FindDominantColor(rightFrequencies);
+            int leftBackground = FindDominantColor(leftFrequencies, cancellationToken);
+            int rightBackground = FindDominantColor(rightFrequencies, cancellationToken);
             int firstDifferentFromLeft = source.Width;
             int lastDifferentFromRight = -1;
 
             for (int y = 0; y < source.Height; y++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 Marshal.Copy(GetRowAddress(data, y), row, 0, row.Length);
 
                 for (int x = 0; x < firstDifferentFromLeft; x++)
@@ -117,8 +124,13 @@ internal static class EmptySpaceCropper
         }
     }
 
-    private static Bitmap CopyRegion(Bitmap source, int left, int width)
+    private static Bitmap CopyRegion(
+        Bitmap source,
+        int left,
+        int width,
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         Bitmap result = new(width, source.Height, PixelFormat.Format32bppArgb);
         PreserveResolution(source, result);
 
@@ -142,6 +154,7 @@ internal static class EmptySpaceCropper
 
             for (int y = 0; y < source.Height; y++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 IntPtr sourceRow = IntPtr.Add(GetRowAddress(sourceData, y), byteOffset);
                 Marshal.Copy(sourceRow, row, 0, row.Length);
                 Marshal.Copy(row, 0, GetRowAddress(resultData, y), row.Length);
@@ -187,14 +200,22 @@ internal static class EmptySpaceCropper
         }
     }
 
-    private static int FindDominantColor(Dictionary<int, ColorFrequency> frequencies)
+    private static int FindDominantColor(
+        Dictionary<int, ColorFrequency> frequencies,
+        CancellationToken cancellationToken)
     {
         int dominantArgb = 0;
         int dominantCount = -1;
         int dominantFirstRow = int.MaxValue;
+        int inspectedColors = 0;
 
         foreach ((int argb, ColorFrequency frequency) in frequencies)
         {
+            if ((inspectedColors++ & 0x3ff) == 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+
             if (frequency.Count > dominantCount
                 || (frequency.Count == dominantCount && frequency.FirstRow < dominantFirstRow))
             {

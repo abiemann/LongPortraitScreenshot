@@ -14,6 +14,15 @@ internal static class Program
         {
             StitchOverlappingFramesReconstructsOriginal();
             StitchSingleFrameReturnsIndependentClone();
+            ExactShiftMeasurementOverridesBiasedScrollEstimate();
+            StandardSizeLimitAcceptsBoundaryAndThrowsTypedAboveIt();
+            StandardActualOverflowThrowsMeasuredTypedException();
+            SafePortionUsesEveryRemainingWholeRow();
+            PartialFinalAppendPreservesTopRowOrderWithoutGaps();
+            CaptureGuardPolicyReturnsOnlySafePrefixes();
+            FullModeBypassesApplicationPixelLimits();
+            StitchHonorsCancellationToken();
+            CaptureResultReportsPartialState();
             RemoveRepeatedFixedOverlaysRestoresChangingBackground();
             RemoveRepeatedFixedOverlaysLeavesDifferentImagesUntouched();
             RemoveRepeatedFixedOverlaysRequiresSafeBackground();
@@ -99,6 +108,264 @@ internal static class Program
         source.SetPixel(0, 0, Color.Magenta);
         Require(actual.GetPixel(0, 0).ToArgb() == originalFirstPixel.ToArgb(),
             "The stitched bitmap changed after the source bitmap was modified.");
+    }
+
+    private static void ExactShiftMeasurementOverridesBiasedScrollEstimate()
+    {
+        const int width = 97;
+        const int fullHeight = 677;
+        const int viewportHeight = 181;
+        const int actualShift = 137;
+        const int deliberatelyBiasedPredictedShift = 149;
+
+        using Bitmap page = CreateDeterministicBitmap(width, fullHeight);
+        using Bitmap firstImage = page.Clone(
+            new Rectangle(0, 0, width, viewportHeight),
+            PixelFormat.Format32bppArgb);
+        using Bitmap secondImage = page.Clone(
+            new Rectangle(0, actualShift, width, viewportHeight),
+            PixelFormat.Format32bppArgb);
+
+        double scrollRange = fullHeight - viewportHeight;
+        double viewSize = viewportHeight * 100.0 / fullHeight;
+        CapturedFrame first = new(firstImage, 0, viewSize);
+        CapturedFrame second = new(
+            secondImage,
+            deliberatelyBiasedPredictedShift * 100.0 / scrollRange,
+            viewSize);
+
+        int measuredShift = VerticalStitcher.MeasureVerticalShift(first, second, currentFrameIndex: 1);
+
+        Require(measuredShift == actualShift,
+            $"Exact seam measurement returned {measuredShift} rows; expected {actualShift} despite biased scroll metadata.");
+    }
+
+    private static void StandardSizeLimitAcceptsBoundaryAndThrowsTypedAboveIt()
+    {
+        CaptureSizePolicy.EnsureStandardEstimateFits(CaptureSizePolicy.SafePixelLimit);
+
+        CaptureSizeLimitExceededException? failure = null;
+        try
+        {
+            CaptureSizePolicy.EnsureStandardEstimateFits(CaptureSizePolicy.SafePixelLimit + 1);
+        }
+        catch (CaptureSizeLimitExceededException exception)
+        {
+            failure = exception;
+        }
+
+        CaptureSizeLimitExceededException typedFailure = failure
+            ?? throw new InvalidOperationException(
+                "Standard mode did not throw its typed exception one pixel above the safety limit.");
+        Require(typedFailure.EstimatedPixels == CaptureSizePolicy.SafePixelLimit + 1,
+            "The typed size exception did not preserve the estimated pixel count.");
+        Require(typedFailure.SafePixelLimit == CaptureSizePolicy.SafePixelLimit,
+            "The typed size exception did not preserve the safe pixel limit.");
+        Require(typedFailure.IsEstimate,
+            "A Standard preflight failure must be identified as an estimate.");
+
+        Rectangle exactLimitBounds = new(0, 0, 1_000, 1_000);
+        long exactEstimate = CaptureSession.EstimateOutputPixels(exactLimitBounds, viewSize: 2.5);
+        Require(exactEstimate == CaptureSizePolicy.SafePixelLimit,
+            $"Expected a {CaptureSizePolicy.SafePixelLimit:N0}-pixel estimate; got {exactEstimate:N0}.");
+        CaptureSession.EnsureCaptureModeCanStart(
+            exactLimitBounds,
+            viewSize: 2.5,
+            CaptureMode.Standard);
+
+        bool startupRejected = false;
+        try
+        {
+            CaptureSession.EnsureCaptureModeCanStart(
+                new Rectangle(0, 0, 1_000, 1_001),
+                viewSize: 2.5,
+                CaptureMode.Standard);
+        }
+        catch (CaptureSizeLimitExceededException)
+        {
+            startupRejected = true;
+        }
+
+        Require(startupRejected,
+            "Standard mode did not reject an over-limit estimate during pre-scroll validation.");
+    }
+
+    private static void StandardActualOverflowThrowsMeasuredTypedException()
+    {
+        CaptureSizePolicy.EnsureStandardActualFits(CaptureSizePolicy.SafePixelLimit);
+
+        CaptureSizeLimitExceededException? failure = null;
+        try
+        {
+            CaptureSizePolicy.EnsureStandardActualFits(CaptureSizePolicy.SafePixelLimit + 1);
+        }
+        catch (CaptureSizeLimitExceededException exception)
+        {
+            failure = exception;
+        }
+
+        CaptureSizeLimitExceededException typedFailure = failure
+            ?? throw new InvalidOperationException(
+                "Standard mode did not throw its typed exception for measured overflow.");
+        Require(!typedFailure.IsEstimate,
+            "A measured Standard overflow was incorrectly identified as a preflight estimate.");
+        Require(typedFailure.EstimatedPixels == CaptureSizePolicy.SafePixelLimit + 1,
+            "The measured overflow exception did not retain its exact pixel count.");
+    }
+
+    private static void SafePortionUsesEveryRemainingWholeRow()
+    {
+        int exactBoundaryRows = CaptureSizePolicy.GetSafeRowsToAppend(
+            width: 1_000,
+            currentHeight: 39_999,
+            availableRows: 2,
+            out long exactBoundaryHeight,
+            out long exactBoundaryPixels);
+        Require(exactBoundaryRows == 1
+            && exactBoundaryHeight == 40_000
+            && exactBoundaryPixels == CaptureSizePolicy.SafePixelLimit,
+            "SafePortion did not truncate a crossing frame at the exact 40,000,000-pixel boundary.");
+
+        int acceptedRows = CaptureSizePolicy.GetSafeRowsToAppend(
+            width: 3,
+            currentHeight: 13_333_330,
+            availableRows: 10,
+            out long acceptedHeight,
+            out long acceptedPixels);
+
+        Require(acceptedRows == 3 && acceptedHeight == 13_333_333,
+            "SafePortion did not consume every remaining complete full-width row.");
+        Require(acceptedPixels == 39_999_999,
+            "SafePortion should leave only the one unusable remainder pixel when width is three.");
+
+        int zeroRows = CaptureSizePolicy.GetSafeRowsToAppend(
+            width: 3,
+            currentHeight: acceptedHeight,
+            availableRows: 1,
+            out long unchangedHeight,
+            out long unchangedPixels);
+        Require(zeroRows == 0
+            && unchangedHeight == acceptedHeight
+            && unchangedPixels == acceptedPixels,
+            "SafePortion accepted a frame row after exhausting the full-width row budget.");
+    }
+
+    private static void PartialFinalAppendPreservesTopRowOrderWithoutGaps()
+    {
+        const int width = 40;
+        const int pageHeight = 60;
+        const int viewportHeight = 40;
+        const int fullShift = 10;
+        const int partialRows = 3;
+
+        using Bitmap page = CreateDeterministicBitmap(width, pageHeight);
+        using Bitmap firstImage = page.Clone(
+            new Rectangle(0, 0, width, viewportHeight),
+            PixelFormat.Format32bppArgb);
+        using Bitmap secondImage = page.Clone(
+            new Rectangle(0, fullShift, width, viewportHeight),
+            PixelFormat.Format32bppArgb);
+        using Bitmap expected = page.Clone(
+            new Rectangle(0, 0, width, viewportHeight + partialRows),
+            PixelFormat.Format32bppArgb);
+
+        double viewSize = viewportHeight * 100.0 / pageHeight;
+        CapturedFrame[] frames =
+        [
+            new(firstImage, 0, viewSize),
+            // Deliberately unusable scroll metadata proves the retained measured shift is reused.
+            new(secondImage, 0, viewSize)
+        ];
+
+        using Bitmap actual = VerticalStitcher.Stitch(
+            frames,
+            maxPixels: width * (viewportHeight + partialRows),
+            removeRepeatedFixedOverlays: true,
+            CancellationToken.None,
+            finalFrameRowsToAppend: partialRows,
+            measuredVerticalShifts: [fullShift]);
+
+        AssertBitmapsEqual(expected, actual, "partial final append without skipped rows");
+    }
+
+    private static void CaptureGuardPolicyReturnsOnlySafePrefixes()
+    {
+        Require(CaptureSizePolicy.ShouldReturnPartialAtCaptureGuard(CaptureMode.SafePortion, 1),
+            "SafePortion must return its valid prefix when a capture guard is reached.");
+        Require(!CaptureSizePolicy.ShouldReturnPartialAtCaptureGuard(CaptureMode.SafePortion, 0),
+            "SafePortion cannot return a partial result before capturing one valid frame.");
+        Require(!CaptureSizePolicy.ShouldReturnPartialAtCaptureGuard(CaptureMode.Standard, 1),
+            "Standard mode must preserve capture-guard failures.");
+        Require(!CaptureSizePolicy.ShouldReturnPartialAtCaptureGuard(CaptureMode.Full, 256),
+            "Full mode must preserve the 256-frame runaway guard.");
+    }
+
+    private static void FullModeBypassesApplicationPixelLimits()
+    {
+        Rectangle overLimitBounds = new(0, 0, 1_000, 1_001);
+        CaptureSession.EnsureCaptureModeCanStart(
+            overLimitBounds,
+            viewSize: 2.5,
+            CaptureMode.Full);
+
+        using Bitmap source = CreateDeterministicBitmap(width: 10, height: 10);
+        CapturedFrame frame = new(source, 0, 100);
+
+        bool limitedStitchRejected = false;
+        try
+        {
+            using Bitmap _ = VerticalStitcher.Stitch([frame], maxPixels: 99);
+        }
+        catch (InvalidOperationException)
+        {
+            limitedStitchRejected = true;
+        }
+
+        Require(limitedStitchRejected,
+            "The stitcher's ordinary pixel limit did not reject an oversized result.");
+
+        using Bitmap noLimitResult = VerticalStitcher.Stitch([frame], maxPixels: long.MaxValue);
+        AssertBitmapsEqual(source, noLimitResult, "Full mode no-limit stitch");
+    }
+
+    private static void StitchHonorsCancellationToken()
+    {
+        using Bitmap source = CreateDeterministicBitmap(width: 40, height: 40);
+        CapturedFrame frame = new(source, 0, 100);
+        using CancellationTokenSource cancellation = new();
+        cancellation.Cancel();
+
+        bool cancelled = false;
+        try
+        {
+            using Bitmap _ = VerticalStitcher.Stitch(
+                [frame],
+                MaximumOutputPixels,
+                removeRepeatedFixedOverlays: false,
+                cancellation.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            cancelled = true;
+        }
+
+        Require(cancelled, "The token-aware stitch overload ignored a pre-cancelled token.");
+    }
+
+    private static void CaptureResultReportsPartialState()
+    {
+        using CaptureResult complete = new(
+            CreateDeterministicBitmap(width: 5, height: 7),
+            "Complete",
+            frameCount: 1);
+        using CaptureResult partial = new(
+            CreateDeterministicBitmap(width: 5, height: 7),
+            "Partial",
+            frameCount: 3,
+            isPartial: true);
+
+        Require(!complete.IsPartial, "The compatible three-argument result constructor must default to complete.");
+        Require(partial.IsPartial, "A SafePortion result did not retain its partial marker.");
     }
 
     private static void RemoveRepeatedFixedOverlaysRestoresChangingBackground()

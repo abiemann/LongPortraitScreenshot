@@ -242,10 +242,10 @@ public sealed class MainForm : Form
 
     private async Task CaptureAtPointAsync(Point screenPoint)
     {
-        CaptureOptions captureOptions = new(
-            _cropVerticalScrollIndicatorCheckBox.Checked,
-            _trimEmptyHorizontalSpaceCheckBox.Checked,
-            _removeRepeatedFixedOverlaysCheckBox.Checked);
+        bool cropVerticalScrollIndicator = _cropVerticalScrollIndicatorCheckBox.Checked;
+        bool trimEmptyHorizontalSpace = _trimEmptyHorizontalSpaceCheckBox.Checked;
+        bool removeRepeatedFixedOverlays = _removeRepeatedFixedOverlaysCheckBox.Checked;
+        CaptureMode captureMode = CaptureMode.Standard;
         _capturing = true;
         _finderTarget.Enabled = false;
         _statusLabel.Text = "Capturing… Press Escape to cancel.";
@@ -256,20 +256,50 @@ public sealed class MainForm : Form
 
         try
         {
-            Hide();
-            await Task.Delay(180, _captureCancellation.Token);
-
-            result = await Task.Run(() =>
+            while (result is null)
             {
-                ScrollTarget? target = TargetResolver.Resolve(screenPoint, Environment.ProcessId);
-                if (target is null)
-                {
-                    throw new InvalidOperationException(
-                        "The selected area does not expose a vertical UI Automation scroll pattern.");
-                }
+                Hide();
+                await Task.Delay(180, _captureCancellation.Token);
 
-                return CaptureSession.Capture(target, captureOptions, _captureCancellation.Token);
-            }, _captureCancellation.Token);
+                try
+                {
+                    CaptureOptions captureOptions = new(
+                        cropVerticalScrollIndicator,
+                        trimEmptyHorizontalSpace,
+                        removeRepeatedFixedOverlays,
+                        captureMode);
+
+                    result = await Task.Run(() =>
+                    {
+                        ScrollTarget? target = TargetResolver.Resolve(screenPoint, Environment.ProcessId);
+                        if (target is null)
+                        {
+                            throw new InvalidOperationException(
+                                "The selected area does not expose a vertical UI Automation scroll pattern.");
+                        }
+
+                        return CaptureSession.Capture(target, captureOptions, _captureCancellation.Token);
+                    }, _captureCancellation.Token);
+                }
+                catch (CaptureSizeLimitExceededException exception) when (captureMode == CaptureMode.Standard)
+                {
+                    Show();
+                    Activate();
+
+                    CaptureMode? selectedMode = ShowOversizedCaptureDialog(exception);
+                    if (selectedMode is null)
+                    {
+                        _statusLabel.Text = "Capture cancelled.";
+                        return;
+                    }
+
+                    captureMode = selectedMode.Value;
+                    _statusLabel.Text = captureMode == CaptureMode.Full
+                        ? "Attempting the entire pane… Press Escape to cancel."
+                        : "Capturing the largest safe top section… Press Escape to cancel.";
+                    _targetLabel.Text = "Resolving target…";
+                }
+            }
         }
         catch (OperationCanceledException)
         {
@@ -314,7 +344,9 @@ public sealed class MainForm : Form
                 FileName = $"PortraitScreenshot_{DateTime.Now:yyyy-MM-dd_HHmmss}.png",
                 InitialDirectory = GetInitialSaveDirectory(),
                 OverwritePrompt = true,
-                Title = "Save the complete scrolling screenshot"
+                Title = result.IsPartial
+                    ? "Save the safe partial screenshot"
+                    : "Save the complete scrolling screenshot"
             };
 
             if (dialog.ShowDialog(this) != DialogResult.OK)
@@ -331,7 +363,10 @@ public sealed class MainForm : Form
                 try
                 {
                     _settings.Save();
-                    _statusLabel.Text = $"Saved {result.Image.Width} × {result.Image.Height:N0} PNG from {result.FrameCount} captures.";
+                    string captureDescription = result.IsPartial ? "safe partial" : "complete";
+                    _statusLabel.Text =
+                        $"Saved {captureDescription} {result.Image.Width} × {result.Image.Height:N0} PNG " +
+                        $"from {result.FrameCount} captures.";
                 }
                 catch (Exception settingsException)
                 {
@@ -350,6 +385,55 @@ public sealed class MainForm : Form
                     MessageBoxIcon.Error);
             }
         }
+    }
+
+    private CaptureMode? ShowOversizedCaptureDialog(CaptureSizeLimitExceededException exception)
+    {
+        double estimatedBitmapMiB = exception.EstimatedPixels * 4.0 / (1024.0 * 1024.0);
+        string sizeFinding = exception.IsEstimate
+            ? $"The screenshot is estimated to need {exception.EstimatedPixels:N0} pixels"
+            : $"The captured content has already reached {exception.EstimatedPixels:N0} pixels";
+        var fullCaptureButton = new TaskDialogCommandLinkButton(
+            "Try to capture all (ignore app pixel limits)",
+            "Attempt the entire pane. The runaway-scroll guard, Windows, or available memory can still stop the capture.",
+            true,
+            true);
+        var safeCaptureButton = new TaskDialogCommandLinkButton(
+            "Capture up to the safe limit",
+            $"Capture the largest full-width section from the top within {exception.SafePixelLimit:N0} pixels.",
+            true,
+            true);
+
+        var page = new TaskDialogPage
+        {
+            AllowCancel = true,
+            Caption = "Long Portrait Screenshot",
+            DefaultButton = safeCaptureButton,
+            Heading = "This pane exceeds the normal safety limit",
+            Icon = TaskDialogIcon.Warning,
+            SizeToContent = true,
+            Text =
+                $"{sizeFinding}, above the " +
+                $"{exception.SafePixelLimit:N0}-pixel safety limit. A 32-bit bitmap at that size would use about " +
+                $"{estimatedBitmapMiB:N0} MiB, and capture processing needs additional memory."
+        };
+        page.Buttons.Add(fullCaptureButton);
+        page.Buttons.Add(safeCaptureButton);
+        page.Buttons.Add(TaskDialogButton.Cancel);
+
+        TaskDialogButton selectedButton = TaskDialog.ShowDialog(
+            this,
+            page,
+            TaskDialogStartupLocation.CenterOwner);
+
+        if (ReferenceEquals(selectedButton, fullCaptureButton))
+        {
+            return CaptureMode.Full;
+        }
+
+        return ReferenceEquals(selectedButton, safeCaptureButton)
+            ? CaptureMode.SafePortion
+            : null;
     }
 
     private string GetInitialSaveDirectory()

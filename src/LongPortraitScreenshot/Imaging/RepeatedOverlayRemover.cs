@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace LongPortraitScreenshot.Imaging;
 
@@ -26,11 +27,13 @@ internal static class RepeatedOverlayRemover
         Bitmap image,
         int viewportHeight,
         IReadOnlyList<int> verticalShifts,
-        IReadOnlyList<CapturedFrame> frames)
+        IReadOnlyList<CapturedFrame> frames,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(image);
         ArgumentNullException.ThrowIfNull(verticalShifts);
         ArgumentNullException.ThrowIfNull(frames);
+        cancellationToken.ThrowIfCancellationRequested();
 
         if (verticalShifts.Count < MinimumOccurrences - 1
             || frames.Count != verticalShifts.Count + 1
@@ -42,12 +45,14 @@ internal static class RepeatedOverlayRemover
         }
 
         using LockedBitmap pixels = new(image);
-        List<Candidate> candidates = FindCandidates(pixels, viewportHeight);
+        List<Candidate> candidates = FindCandidates(pixels, viewportHeight, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
         candidates.Sort((left, right) => right.PixelCount.CompareTo(left.PixelCount));
 
         List<RemovalGroup> groups = [];
         foreach (Candidate candidate in candidates)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             Rectangle paddedBounds = candidate.Bounds;
             paddedBounds.Inflate(FillPadding, FillPadding);
 
@@ -61,7 +66,8 @@ internal static class RepeatedOverlayRemover
                 candidate,
                 viewportHeight,
                 verticalShifts,
-                frames);
+                frames,
+                cancellationToken);
             if (group is not null)
             {
                 groups.Add(group);
@@ -70,14 +76,19 @@ internal static class RepeatedOverlayRemover
 
         foreach (RemovalGroup group in groups)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             foreach (Occurrence occurrence in group.Occurrences)
             {
-                pixels.Fill(occurrence.Bounds, occurrence.BackgroundRows);
+                cancellationToken.ThrowIfCancellationRequested();
+                pixels.Fill(occurrence.Bounds, occurrence.BackgroundRows, cancellationToken);
             }
         }
     }
 
-    private static List<Candidate> FindCandidates(LockedBitmap pixels, int viewportHeight)
+    private static List<Candidate> FindCandidates(
+        LockedBitmap pixels,
+        int viewportHeight,
+        CancellationToken cancellationToken)
     {
         int bandWidth = Math.Min(
             pixels.Width / 2,
@@ -89,12 +100,22 @@ internal static class RepeatedOverlayRemover
 
         Rectangle leftBand = new(0, 0, bandWidth, viewportHeight);
         Rectangle rightBand = new(pixels.Width - bandWidth, 0, bandWidth, viewportHeight);
-        List<Candidate> candidates = FindCandidatesInBand(pixels.Read(leftBand), leftBand);
-        candidates.AddRange(FindCandidatesInBand(pixels.Read(rightBand), rightBand));
+        List<Candidate> candidates = FindCandidatesInBand(
+            pixels.Read(leftBand, cancellationToken),
+            leftBand,
+            cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        candidates.AddRange(FindCandidatesInBand(
+            pixels.Read(rightBand, cancellationToken),
+            rightBand,
+            cancellationToken));
         return candidates;
     }
 
-    private static List<Candidate> FindCandidatesInBand(byte[] bandPixels, Rectangle band)
+    private static List<Candidate> FindCandidatesInBand(
+        byte[] bandPixels,
+        Rectangle band,
+        CancellationToken cancellationToken)
     {
         int width = band.Width;
         int height = band.Height;
@@ -105,6 +126,7 @@ internal static class RepeatedOverlayRemover
 
         for (int y = 0; y < height; y++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             Array.Clear(blueHistogram);
             Array.Clear(greenHistogram);
             Array.Clear(redHistogram);
@@ -142,6 +164,11 @@ internal static class RepeatedOverlayRemover
 
         for (int start = 0; start < mask.Length; start++)
         {
+            if ((start & 0xfff) == 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+
             if (mask[start] == 0)
             {
                 continue;
@@ -160,6 +187,11 @@ internal static class RepeatedOverlayRemover
 
             while (workIndex < workCount)
             {
+                if ((workIndex & 0x3ff) == 0)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
+
                 int current = work[workIndex++];
                 int x = current % width;
                 int y = current / width;
@@ -222,7 +254,8 @@ internal static class RepeatedOverlayRemover
         Candidate candidate,
         int viewportHeight,
         IReadOnlyList<int> verticalShifts,
-        IReadOnlyList<CapturedFrame> frames)
+        IReadOnlyList<CapturedFrame> frames,
+        CancellationToken cancellationToken)
     {
         Rectangle firstBounds = candidate.Bounds;
         firstBounds.Inflate(FillPadding, FillPadding);
@@ -232,6 +265,7 @@ internal static class RepeatedOverlayRemover
 
         foreach (int shift in verticalShifts)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (shift <= 0 || shift >= viewportHeight)
             {
                 return null;
@@ -264,7 +298,8 @@ internal static class RepeatedOverlayRemover
         List<Occurrence> occurrences = [];
         foreach (Rectangle bounds in occurrenceBounds)
         {
-            Occurrence? occurrence = TryAnalyzeOccurrence(pixels, bounds);
+            cancellationToken.ThrowIfCancellationRequested();
+            Occurrence? occurrence = TryAnalyzeOccurrence(pixels, bounds, cancellationToken);
             if (occurrence is null)
             {
                 return null;
@@ -274,14 +309,15 @@ internal static class RepeatedOverlayRemover
         }
 
         Occurrence reference = occurrences[0];
-        if (!HasEnoughForeground(reference))
+        if (!HasEnoughForeground(reference, cancellationToken))
         {
             return null;
         }
 
         for (int index = 1; index < occurrences.Count; index++)
         {
-            if (!Matches(reference, occurrences[index]))
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!Matches(reference, occurrences[index], cancellationToken))
             {
                 return null;
             }
@@ -292,7 +328,8 @@ internal static class RepeatedOverlayRemover
                 firstBounds,
                 viewportHeight,
                 verticalShifts,
-                frames))
+                frames,
+                cancellationToken))
         {
             return null;
         }
@@ -305,7 +342,8 @@ internal static class RepeatedOverlayRemover
         Rectangle paddedBounds,
         int viewportHeight,
         IReadOnlyList<int> verticalShifts,
-        IReadOnlyList<CapturedFrame> frames)
+        IReadOnlyList<CapturedFrame> frames,
+        CancellationToken cancellationToken)
     {
         int conclusiveNonmatches = 0;
 
@@ -313,6 +351,7 @@ internal static class RepeatedOverlayRemover
         // the next frame. A match there proves that the candidate scrolls with the page.
         for (int index = 0; index < verticalShifts.Count; index++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             int shift = verticalShifts[index];
             int copiedSourceTop = viewportHeight - shift;
             if (paddedBounds.Top < copiedSourceTop)
@@ -333,14 +372,20 @@ internal static class RepeatedOverlayRemover
                 return false;
             }
 
-            byte[]? previous = TryReadFrameRegion(frames[index].Image, candidate.Bounds);
-            byte[]? moved = TryReadFrameRegion(frames[index + 1].Image, movedBounds);
+            byte[]? previous = TryReadFrameRegion(
+                frames[index].Image,
+                candidate.Bounds,
+                cancellationToken);
+            byte[]? moved = TryReadFrameRegion(
+                frames[index + 1].Image,
+                movedBounds,
+                cancellationToken);
             if (previous is null || moved is null)
             {
                 return false;
             }
 
-            MotionComparison comparison = CompareMotion(previous, moved);
+            MotionComparison comparison = CompareMotion(previous, moved, cancellationToken);
             if (comparison is MotionComparison.Match or MotionComparison.Ambiguous)
             {
                 return false;
@@ -352,7 +397,10 @@ internal static class RepeatedOverlayRemover
         return conclusiveNonmatches >= 2;
     }
 
-    private static MotionComparison CompareMotion(byte[] previous, byte[] moved)
+    private static MotionComparison CompareMotion(
+        byte[] previous,
+        byte[] moved,
+        CancellationToken cancellationToken)
     {
         if (previous.Length != moved.Length || previous.Length == 0)
         {
@@ -365,6 +413,11 @@ internal static class RepeatedOverlayRemover
 
         for (int offset = 0; offset < previous.Length; offset += 4)
         {
+            if ((offset & 0xfff) == 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+
             int blueDifference = Math.Abs(previous[offset] - moved[offset]);
             int greenDifference = Math.Abs(previous[offset + 1] - moved[offset + 1]);
             int redDifference = Math.Abs(previous[offset + 2] - moved[offset + 2]);
@@ -390,7 +443,10 @@ internal static class RepeatedOverlayRemover
             : MotionComparison.Ambiguous;
     }
 
-    private static byte[]? TryReadFrameRegion(Bitmap image, Rectangle bounds)
+    private static byte[]? TryReadFrameRegion(
+        Bitmap image,
+        Rectangle bounds,
+        CancellationToken cancellationToken)
     {
         if (image.PixelFormat != PixelFormat.Format32bppArgb
             || bounds.Left < 0
@@ -413,6 +469,7 @@ internal static class RepeatedOverlayRemover
 
             for (int y = 0; y < bounds.Height; y++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 IntPtr source = IntPtr.Add(
                     data.Scan0,
                     checked((bounds.Y + y) * data.Stride + bounds.X * 4));
@@ -436,7 +493,10 @@ internal static class RepeatedOverlayRemover
         }
     }
 
-    private static Occurrence? TryAnalyzeOccurrence(LockedBitmap pixels, Rectangle bounds)
+    private static Occurrence? TryAnalyzeOccurrence(
+        LockedBitmap pixels,
+        Rectangle bounds,
+        CancellationToken cancellationToken)
     {
         Rectangle outerBounds = bounds;
         outerBounds.Inflate(RingThickness, RingThickness);
@@ -448,7 +508,7 @@ internal static class RepeatedOverlayRemover
             return null;
         }
 
-        byte[] patch = pixels.Read(outerBounds);
+        byte[] patch = pixels.Read(outerBounds, cancellationToken);
         int minimumBlue = 255;
         int minimumGreen = 255;
         int minimumRed = 255;
@@ -458,6 +518,7 @@ internal static class RepeatedOverlayRemover
 
         for (int y = 0; y < outerBounds.Height; y++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             for (int x = 0; x < outerBounds.Width; x++)
             {
                 bool isRing = x < RingThickness
@@ -489,6 +550,7 @@ internal static class RepeatedOverlayRemover
         BackgroundRow[] backgroundRows = new BackgroundRow[bounds.Height];
         for (int y = 0; y < bounds.Height; y++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             int patchY = RingThickness + y;
             Bgra left = FindMedianPixel(patch, outerBounds.Width, patchY, 0, RingThickness);
             Bgra right = FindMedianPixel(
@@ -503,11 +565,14 @@ internal static class RepeatedOverlayRemover
         return new Occurrence(bounds, patch, outerBounds.Width, backgroundRows);
     }
 
-    private static bool HasEnoughForeground(Occurrence occurrence)
+    private static bool HasEnoughForeground(
+        Occurrence occurrence,
+        CancellationToken cancellationToken)
     {
         int count = 0;
         for (int y = FillPadding; y < occurrence.Bounds.Height - FillPadding; y++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             for (int x = FillPadding; x < occurrence.Bounds.Width - FillPadding; x++)
             {
                 Bgra pixel = occurrence.GetPixel(x, y);
@@ -522,7 +587,10 @@ internal static class RepeatedOverlayRemover
         return count >= MinimumCandidatePixels;
     }
 
-    private static bool Matches(Occurrence reference, Occurrence candidate)
+    private static bool Matches(
+        Occurrence reference,
+        Occurrence candidate,
+        CancellationToken cancellationToken)
     {
         int referenceForeground = 0;
         int intersection = 0;
@@ -532,6 +600,7 @@ internal static class RepeatedOverlayRemover
 
         for (int y = FillPadding; y < reference.Bounds.Height - FillPadding; y++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             for (int x = FillPadding; x < reference.Bounds.Width - FillPadding; x++)
             {
                 Bgra referencePixel = reference.GetPixel(x, y);
@@ -729,13 +798,15 @@ internal static class RepeatedOverlayRemover
 
         public int Height { get; }
 
-        public byte[] Read(Rectangle bounds)
+        public byte[] Read(Rectangle bounds, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             int rowBytes = checked(bounds.Width * 4);
             byte[] pixels = new byte[checked(rowBytes * bounds.Height)];
 
             for (int y = 0; y < bounds.Height; y++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 IntPtr source = IntPtr.Add(
                     _data.Scan0,
                     checked((bounds.Y + y) * _data.Stride + bounds.X * 4));
@@ -745,13 +816,18 @@ internal static class RepeatedOverlayRemover
             return pixels;
         }
 
-        public void Fill(Rectangle bounds, IReadOnlyList<BackgroundRow> backgroundRows)
+        public void Fill(
+            Rectangle bounds,
+            IReadOnlyList<BackgroundRow> backgroundRows,
+            CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             int rowBytes = checked(bounds.Width * 4);
             byte[] row = new byte[rowBytes];
 
             for (int y = 0; y < bounds.Height; y++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 for (int x = 0; x < bounds.Width; x++)
                 {
                     Bgra pixel = backgroundRows[y].Interpolate(x, bounds.Width);
