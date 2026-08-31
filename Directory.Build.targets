@@ -1,0 +1,5 @@
+<Project>
+  <ItemGroup Condition="'$(MSBuildProjectName)' == 'LongPortraitScreenshot'">
+    <Compile Remove="LongPortraitScreenshot.SelfTest\**\*.cs" />
+  </ItemGroup>
+</Project>
