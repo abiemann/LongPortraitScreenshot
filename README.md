@@ -4,6 +4,8 @@ A Windows desktop utility that selects a vertically scrollable UI Automation ele
 
 ![Long Portrait Screenshot main window](docs/main-window.png)
 
+Download the per-user x64 Windows setup from [GitHub Releases](https://github.com/abiemann/LongPortraitScreenshot/releases). It installs without administrator access and preserves your settings when uninstalled. Because the installer is not code-signed, Windows may show a SmartScreen warning.
+
 ## Requirements
 
 - Windows 10 or Windows 11

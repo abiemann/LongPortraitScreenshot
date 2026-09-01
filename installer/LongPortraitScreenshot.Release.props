@@ -1,0 +1,26 @@
+<Project>
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'LongPortraitScreenshot'">
+    <Product>Long Portrait Screenshot</Product>
+    <AssemblyTitle>Long Portrait Screenshot</AssemblyTitle>
+    <Authors>Alexander R. Biemann</Authors>
+    <Company>Alexander R. Biemann</Company>
+    <Description>A Windows utility that captures an entire vertically scrolling pane as one PNG.</Description>
+    <Copyright>Copyright (c) 2026 Alexander R. Biemann</Copyright>
+    <Version>$(LongPortraitScreenshotPackageVersion)</Version>
+    <AssemblyVersion>$(LongPortraitScreenshotWindowsVersion)</AssemblyVersion>
+    <FileVersion>$(LongPortraitScreenshotWindowsVersion)</FileVersion>
+    <InformationalVersion>$(LongPortraitScreenshotDisplayVersion)</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+
+  <Target Name="ValidateLongPortraitScreenshotReleaseProperties"
+          BeforeTargets="PrepareForBuild"
+          Condition="'$(MSBuildProjectName)' == 'LongPortraitScreenshot'">
+    <Error Condition="'$(LongPortraitScreenshotPackageVersion)' == ''"
+           Text="LongPortraitScreenshotPackageVersion must be set for a release publish." />
+    <Error Condition="'$(LongPortraitScreenshotWindowsVersion)' == ''"
+           Text="LongPortraitScreenshotWindowsVersion must be set for a release publish." />
+    <Error Condition="'$(LongPortraitScreenshotDisplayVersion)' == ''"
+           Text="LongPortraitScreenshotDisplayVersion must be set for a release publish." />
+  </Target>
+</Project>
