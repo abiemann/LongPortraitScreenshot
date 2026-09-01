@@ -1,4 +1,3 @@
-using System.Drawing.Imaging;
 using LongPortraitScreenshot.Automation;
 using LongPortraitScreenshot.Capture;
 using LongPortraitScreenshot.Configuration;
@@ -318,53 +317,54 @@ public sealed class MainForm : Form
         {
             _targetLabel.Text = result.TargetName;
 
-            using var dialog = new SaveFileDialog
-            {
-                AddExtension = true,
-                DefaultExt = "png",
-                Filter = "PNG image (*.png)|*.png",
-                FileName = $"PortraitScreenshot_{DateTime.Now:yyyy-MM-dd_HHmmss}.png",
-                InitialDirectory = GetInitialSaveDirectory(),
-                OverwritePrompt = true,
-                Title = result.IsPartial
-                    ? "Save the safe partial screenshot"
-                    : "Save the complete scrolling screenshot"
-            };
+            using CapturePreviewForm preview = new(
+                result.Image,
+                result.TargetName,
+                result.FrameCount,
+                result.IsPartial,
+                GetInitialSaveDirectory(),
+                $"PortraitScreenshot_{DateTime.Now:yyyy-MM-dd_HHmmss}.png");
 
-            if (dialog.ShowDialog(this) != DialogResult.OK)
+            _statusLabel.Text = "Review the capture, crop if needed, then choose Save As.";
+            bool restoreTopMost = TopMost;
+            DialogResult previewResult;
+
+            try
+            {
+                // A topmost owner can otherwise remain above an owned modal form.
+                // Keep only the preview in the topmost band until it closes.
+                TopMost = false;
+                preview.TopMost = restoreTopMost;
+                previewResult = preview.ShowDialog(this);
+            }
+            finally
+            {
+                preview.TopMost = false;
+                TopMost = restoreTopMost;
+            }
+
+            if (previewResult != DialogResult.OK
+                || string.IsNullOrWhiteSpace(preview.SavedPath))
             {
                 _statusLabel.Text = "Capture discarded without saving.";
                 return;
             }
 
+            _settings.LastSaveDirectory = Path.GetDirectoryName(preview.SavedPath);
+
             try
             {
-                SavePngAtomically(result.Image, dialog.FileName);
-                _settings.LastSaveDirectory = Path.GetDirectoryName(Path.GetFullPath(dialog.FileName));
-
-                try
-                {
-                    _settings.Save();
-                    string captureDescription = result.IsPartial ? "safe partial" : "complete";
-                    _statusLabel.Text =
-                        $"Saved {captureDescription} {result.Image.Width} × {result.Image.Height:N0} PNG " +
-                        $"from {result.FrameCount} captures.";
-                }
-                catch (Exception settingsException)
-                {
-                    _statusLabel.Text =
-                        $"Screenshot saved, but the folder preference could not be saved: {settingsException.Message}";
-                }
+                _settings.Save();
+                string captureDescription = result.IsPartial ? "safe partial" : "complete";
+                _statusLabel.Text =
+                    $"Saved {captureDescription} {preview.SavedSize.Width:N0} × " +
+                    $"{preview.SavedSize.Height:N0} PNG " +
+                    $"from {result.FrameCount} captures.";
             }
-            catch (Exception ex)
+            catch (Exception settingsException)
             {
-                _statusLabel.Text = "The screenshot was captured but could not be saved.";
-                MessageBox.Show(
-                    this,
-                    ex.Message,
-                    "Unable to save screenshot",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+                _statusLabel.Text =
+                    $"Screenshot saved, but the folder preference could not be saved: {settingsException.Message}";
             }
         }
     }
@@ -431,30 +431,4 @@ public sealed class MainForm : Form
         return Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
     }
 
-    private static void SavePngAtomically(Image image, string destinationPath)
-    {
-        string fullPath = Path.GetFullPath(destinationPath);
-        string? directory = Path.GetDirectoryName(fullPath);
-        if (string.IsNullOrEmpty(directory))
-        {
-            throw new InvalidOperationException("Choose a valid destination folder.");
-        }
-
-        string temporaryPath = Path.Combine(
-            directory,
-            $".{Path.GetFileName(fullPath)}.{Guid.NewGuid():N}.tmp");
-
-        try
-        {
-            image.Save(temporaryPath, ImageFormat.Png);
-            File.Move(temporaryPath, fullPath, true);
-        }
-        finally
-        {
-            if (File.Exists(temporaryPath))
-            {
-                File.Delete(temporaryPath);
-            }
-        }
-    }
 }

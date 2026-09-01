@@ -1,6 +1,7 @@
 using System.Drawing.Imaging;
 using LongPortraitScreenshot.Capture;
 using LongPortraitScreenshot.Imaging;
+using LongPortraitScreenshot.UI;
 
 namespace LongPortraitScreenshot.SelfTest;
 
@@ -31,6 +32,12 @@ internal static class Program
             FullModeBypassesApplicationPixelLimits();
             StitchHonorsCancellationToken();
             CaptureResultReportsPartialState();
+            CropSelectionMovesEachEdgeAndUpdatesMemory();
+            CropSelectionClampsAndPreventsEmptyOutput();
+            CropSelectionResetRestoresFullImage();
+            CropSelectionLargeMemoryCalculationDoesNotOverflow();
+            ManualCropPreservesExactPixelsDpiAndSource();
+            AtomicPngSaveWritesAndOverwritesWithoutTemporaryFiles();
             CropRightRemovesExpectedPixelsAndPreservesDpi();
             CropRightKeepsOnePixelForNarrowImages();
             TrimEmptySpaceFromBothSidesKeepsFivePixelMargins();
@@ -721,6 +728,159 @@ internal static class Program
 
         Require(!complete.IsPartial, "The compatible three-argument result constructor must default to complete.");
         Require(partial.IsPartial, "A SafePortion result did not retain its partial marker.");
+    }
+
+    private static void CropSelectionMovesEachEdgeAndUpdatesMemory()
+    {
+        CropSelection selection = new(new Size(width: 100, height: 200));
+
+        selection.MoveEdge(CropEdge.Top, 10);
+        selection.MoveEdge(CropEdge.Right, 90);
+        selection.MoveEdge(CropEdge.Bottom, 170);
+        selection.MoveEdge(CropEdge.Left, 15);
+
+        Rectangle expected = Rectangle.FromLTRB(15, 10, 90, 170);
+        Require(selection.Bounds == expected,
+            $"Four-edge crop produced {selection.Bounds}; expected {expected}.");
+        Require(selection.IsCropped, "A changed crop was incorrectly reported as full-size.");
+        Require(selection.Estimated32BitMemoryBytes == 75UL * 160UL * sizeof(int),
+            "The crop memory estimate did not use the live output dimensions at 32 bits per pixel.");
+    }
+
+    private static void CropSelectionClampsAndPreventsEmptyOutput()
+    {
+        CropSelection selection = new(new Size(width: 10, height: 8));
+
+        selection.MoveEdge(CropEdge.Top, int.MaxValue);
+        Require(selection.Bounds == Rectangle.FromLTRB(0, 7, 10, 8),
+            "The top edge was not clamped to leave one output row.");
+
+        selection.Reset();
+        selection.MoveEdge(CropEdge.Right, int.MinValue);
+        Require(selection.Bounds == Rectangle.FromLTRB(0, 0, 1, 8),
+            "The right edge was not clamped to leave one output column.");
+
+        selection.Reset();
+        selection.MoveEdge(CropEdge.Bottom, int.MinValue);
+        Require(selection.Bounds == Rectangle.FromLTRB(0, 0, 10, 1),
+            "The bottom edge was not clamped to leave one output row.");
+
+        selection.Reset();
+        selection.MoveEdge(CropEdge.Left, int.MaxValue);
+        Require(selection.Bounds == Rectangle.FromLTRB(9, 0, 10, 8),
+            "The left edge was not clamped to leave one output column.");
+    }
+
+    private static void CropSelectionResetRestoresFullImage()
+    {
+        CropSelection selection = new(new Size(width: 83, height: 127));
+        selection.MoveEdge(CropEdge.Top, 11);
+        selection.MoveEdge(CropEdge.Right, 72);
+
+        selection.Reset();
+
+        Require(selection.Bounds == new Rectangle(0, 0, 83, 127),
+            "Reset did not restore the full image bounds.");
+        Require(!selection.IsCropped,
+            "A reset crop was still reported as cropped.");
+        Require(selection.Estimated32BitMemoryBytes == 83UL * 127UL * sizeof(int),
+            "Reset did not restore the full image memory estimate.");
+    }
+
+    private static void CropSelectionLargeMemoryCalculationDoesNotOverflow()
+    {
+        const int width = 2_000_000_000;
+        const int height = 2_000_000_000;
+        CropSelection selection = new(new Size(width, height));
+
+        ulong expectedBytes = (ulong)width * (ulong)height * sizeof(int);
+        Require(selection.Estimated32BitMemoryBytes == expectedBytes,
+            "The 32-bit bitmap memory estimate overflowed for very large dimensions.");
+    }
+
+    private static void ManualCropPreservesExactPixelsDpiAndSource()
+    {
+        using Bitmap source = new(width: 8, height: 7, PixelFormat.Format32bppArgb);
+        source.SetResolution(144, 120);
+
+        for (int y = 0; y < source.Height; y++)
+        {
+            for (int x = 0; x < source.Width; x++)
+            {
+                source.SetPixel(
+                    x,
+                    y,
+                    Color.FromArgb(
+                        (x * 29 + y * 43) & 0xff,
+                        (x * 31 + y * 17) & 0xff,
+                        (x * 7 + y * 47) & 0xff,
+                        (x * 19 + y * 71) & 0xff));
+            }
+        }
+
+        using Bitmap original = (Bitmap)source.Clone();
+        Rectangle bounds = Rectangle.FromLTRB(1, 2, 7, 6);
+        using Bitmap actual = BitmapCropper.Crop(source, bounds);
+
+        Require(actual.Size == bounds.Size,
+            $"Manual crop produced {actual.Width}x{actual.Height}; expected " +
+            $"{bounds.Width}x{bounds.Height}.");
+        Require(Math.Abs(actual.HorizontalResolution - source.HorizontalResolution) < 0.01f
+            && Math.Abs(actual.VerticalResolution - source.VerticalResolution) < 0.01f,
+            "Manual crop did not preserve the source bitmap DPI.");
+
+        for (int y = 0; y < actual.Height; y++)
+        {
+            for (int x = 0; x < actual.Width; x++)
+            {
+                int expectedArgb = source.GetPixel(bounds.Left + x, bounds.Top + y).ToArgb();
+                int actualArgb = actual.GetPixel(x, y).ToArgb();
+                Require(actualArgb == expectedArgb,
+                    $"Manual crop pixel ({x}, {y}) was 0x{actualArgb:X8}; " +
+                    $"expected source pixel ({bounds.Left + x}, {bounds.Top + y}) " +
+                    $"to be 0x{expectedArgb:X8}.");
+            }
+        }
+
+        AssertBitmapsEqual(original, source, "manual crop leaves source unchanged");
+    }
+
+    private static void AtomicPngSaveWritesAndOverwritesWithoutTemporaryFiles()
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            $"LongPortraitScreenshot.SelfTest.{Guid.NewGuid():N}");
+        string destination = Path.Combine(directory, "capture.png");
+        Directory.CreateDirectory(directory);
+
+        try
+        {
+            using Bitmap first = CreateDeterministicBitmap(width: 11, height: 13);
+            PngFileSaver.Save(first, destination);
+
+            using (Bitmap decoded = new(destination))
+            {
+                AssertBitmapsEqual(first, decoded, "first atomic PNG save");
+            }
+
+            using Bitmap replacement = CreateSolidBitmap(
+                width: 7,
+                height: 5,
+                Color.CornflowerBlue);
+            PngFileSaver.Save(replacement, destination);
+
+            using (Bitmap decoded = new(destination))
+            {
+                AssertBitmapsEqual(replacement, decoded, "atomic PNG overwrite");
+            }
+
+            Require(Directory.GetFiles(directory, "*.tmp").Length == 0,
+                "Atomic PNG saving left a temporary file behind.");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     private static void CropRightRemovesExpectedPixelsAndPreservesDpi()
