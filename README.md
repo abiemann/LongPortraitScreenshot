@@ -28,7 +28,7 @@ dotnet run --project .\tests\LongPortraitScreenshot.SelfTest\LongPortraitScreens
 3. Release the mouse. The utility scrolls the pane, captures it, restores its original position, and asks where to save the PNG.
 4. Press Escape during capture to cancel.
 
-The scrollbar-crop, horizontal-empty-space trim, and repeated-fixed-overlay cleanup options are enabled by default and remembered for each Windows user. Horizontal trimming keeps a 5-pixel margin beside detected content. Overlay cleanup removes small floating controls only when at least three matching copies can be identified safely.
+The scrollbar-crop and horizontal-empty-space trim options are enabled by default and remembered for each Windows user. Horizontal trimming keeps a 5-pixel margin beside detected content.
 
 When a capture is estimated to exceed the normal 40,000,000-pixel safety limit, the app offers three choices: attempt the entire pane, capture the largest complete section from the top that fits within the limit, or cancel. The full-capture choice bypasses the app's pixel safety guards, but the runaway-scroll guard, Windows bitmap limits, and available memory still apply.
 

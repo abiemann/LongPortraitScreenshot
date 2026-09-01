@@ -14,37 +14,31 @@ public static class VerticalStitcher
 
     public static Bitmap Stitch(
         IReadOnlyList<CapturedFrame> frames,
-        long maxPixels = 40_000_000,
-        bool removeRepeatedFixedOverlays = false) =>
+        long maxPixels = 40_000_000) =>
         Stitch(
             frames,
             maxPixels,
-            removeRepeatedFixedOverlays,
             CancellationToken.None,
             finalFrameRowsToAppend: null);
 
     public static Bitmap Stitch(
         IReadOnlyList<CapturedFrame> frames,
         long maxPixels,
-        bool removeRepeatedFixedOverlays,
         CancellationToken cancellationToken) =>
         Stitch(
             frames,
             maxPixels,
-            removeRepeatedFixedOverlays,
             cancellationToken,
             finalFrameRowsToAppend: null);
 
     internal static Bitmap Stitch(
         IReadOnlyList<CapturedFrame> frames,
         long maxPixels,
-        bool removeRepeatedFixedOverlays,
         CancellationToken cancellationToken,
         int? finalFrameRowsToAppend) =>
         Stitch(
             frames,
             maxPixels,
-            removeRepeatedFixedOverlays,
             cancellationToken,
             finalFrameRowsToAppend,
             measuredVerticalShifts: null);
@@ -52,7 +46,6 @@ public static class VerticalStitcher
     internal static Bitmap Stitch(
         IReadOnlyList<CapturedFrame> frames,
         long maxPixels,
-        bool removeRepeatedFixedOverlays,
         CancellationToken cancellationToken,
         int? finalFrameRowsToAppend,
         IReadOnlyList<int>? measuredVerticalShifts)
@@ -175,36 +168,6 @@ public static class VerticalStitcher
                     destinationY += newRows;
                 }
             }
-
-            cancellationToken.ThrowIfCancellationRequested();
-            if (removeRepeatedFixedOverlays)
-            {
-                IReadOnlyList<int> overlayShifts = shifts;
-                IReadOnlyList<CapturedFrame> overlayFrames = frames;
-                if (finalFrameRowsToAppend is not null)
-                {
-                    int fullTransitionCount = shifts.Length - 1;
-                    int[] fullShifts = new int[fullTransitionCount];
-                    CapturedFrame[] fullFrames = new CapturedFrame[fullTransitionCount + 1];
-                    Array.Copy(shifts, fullShifts, fullTransitionCount);
-                    for (int index = 0; index < fullFrames.Length; index++)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        fullFrames[index] = frames[index];
-                    }
-
-                    overlayShifts = fullShifts;
-                    overlayFrames = fullFrames;
-                }
-
-                RepeatedOverlayRemover.Remove(
-                    output,
-                    height,
-                    overlayShifts,
-                    overlayFrames,
-                    cancellationToken);
-            }
-
             cancellationToken.ThrowIfCancellationRequested();
             return output;
         }

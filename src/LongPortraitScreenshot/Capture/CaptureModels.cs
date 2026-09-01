@@ -4,18 +4,15 @@ namespace LongPortraitScreenshot.Capture;
 
 public sealed record CaptureOptions(
     bool CropVerticalScrollIndicator,
-    bool TrimEmptyHorizontalSpace,
-    bool RemoveRepeatedFixedOverlays)
+    bool TrimEmptyHorizontalSpace)
 {
     internal CaptureOptions(
         bool cropVerticalScrollIndicator,
         bool trimEmptyHorizontalSpace,
-        bool removeRepeatedFixedOverlays,
         CaptureMode mode)
         : this(
             cropVerticalScrollIndicator,
-            trimEmptyHorizontalSpace,
-            removeRepeatedFixedOverlays)
+            trimEmptyHorizontalSpace)
     {
         Mode = mode;
     }

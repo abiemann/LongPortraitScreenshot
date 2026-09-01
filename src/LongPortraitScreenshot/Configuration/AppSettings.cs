@@ -14,8 +14,6 @@ internal sealed class AppSettings
 
     public bool TrimEmptyHorizontalSpace { get; set; } = true;
 
-    public bool RemoveRepeatedFixedOverlays { get; set; } = true;
-
     public string? LastSaveDirectory { get; set; }
 
     public static AppSettings Load()

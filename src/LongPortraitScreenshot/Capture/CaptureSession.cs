@@ -291,7 +291,6 @@ internal static class CaptureSession
                     options.Mode == CaptureMode.Full
                         ? long.MaxValue
                         : CaptureSizePolicy.SafePixelLimit,
-                    options.RemoveRepeatedFixedOverlays,
                     processingToken,
                     finalFrameRowsToAppend,
                     options.Mode == CaptureMode.Full ? null : measuredVerticalShifts);
