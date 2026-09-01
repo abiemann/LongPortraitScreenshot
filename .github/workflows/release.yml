@@ -1,0 +1,57 @@
+name: Build release
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload:
+    runs-on: windows-latest
+    env:
+      RELEASE_ARCHIVE: .\artifacts\LongPortraitScreenshot-win-x64.zip
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+
+    steps:
+      - name: Check out released source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+          dotnet-quality: 'ga'
+
+      - name: Restore
+        run: dotnet restore .\LongPortraitScreenshot.sln
+
+      - name: Build
+        run: dotnet build .\LongPortraitScreenshot.sln --configuration Release --no-restore
+
+      - name: Run self-tests
+        run: dotnet run --project .\tests\LongPortraitScreenshot.SelfTest\LongPortraitScreenshot.SelfTest.csproj --configuration Release --no-build
+
+      - name: Publish self-contained Windows x64 build
+        run: dotnet publish .\src\LongPortraitScreenshot\LongPortraitScreenshot.csproj --configuration Release --runtime win-x64 --self-contained true --output .\artifacts\LongPortraitScreenshot-win-x64
+
+      - name: Package release
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path ".\artifacts\LongPortraitScreenshot-win-x64\*" `
+            -DestinationPath $env:RELEASE_ARCHIVE `
+            -CompressionLevel Optimal
+
+      - name: Upload release package
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload $env:RELEASE_TAG $env:RELEASE_ARCHIVE `
+            --repo "${{ github.repository }}" `
+            --clobber

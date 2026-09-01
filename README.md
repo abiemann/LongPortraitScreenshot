@@ -2,6 +2,8 @@
 
 A Windows desktop utility that selects a vertically scrollable UI Automation element, captures each visible viewport, and stitches the captures into one PNG.
 
+![Long Portrait Screenshot main window](docs/main-window.png)
+
 ## Requirements
 
 - Windows 10 or Windows 11
