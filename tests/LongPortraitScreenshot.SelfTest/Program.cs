@@ -9,6 +9,7 @@ internal static class Program
 {
     private const long MaximumOutputPixels = 64_000_000;
 
+    [STAThread]
     private static int Main()
     {
         try
@@ -48,6 +49,10 @@ internal static class Program
             ScrollSettleRestartsWhenRenderCheckMoves();
             ScrollSettleRejectsNeverMovingRequest();
             ScrollSettleAllowsAlreadySatisfiedRequest();
+
+            ImagingRegressionTests.Run();
+            UiSaveRegressionTests.Run();
+            ScrollPositionRegressionTests.Run();
 
             Console.WriteLine("All LongPortraitScreenshot self-tests passed.");
             return 0;

@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -86,19 +87,21 @@ public static class VerticalStitcher
         }
 
         int[] shifts = new int[frames.Count - 1];
+        int[] compositionSourceRows = new int[frames.Count - 1];
         int[] rowsToAppend = new int[frames.Count - 1];
         long outputHeight = height;
 
         for (int index = 1; index < frames.Count; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            int shift = measuredVerticalShifts is null
-                ? MeasureVerticalShift(
+            VerticalAlignment alignment = measuredVerticalShifts is null
+                ? MeasureVerticalAlignment(
                     frames[index - 1],
                     frames[index],
                     index,
                     cancellationToken)
-                : measuredVerticalShifts[index - 1];
+                : new VerticalAlignment(measuredVerticalShifts[index - 1], -1);
+            int shift = alignment.Shift;
             int maximumMeasuredShift = height - Math.Max(24, height / 8);
             if (shift <= 0 || shift > maximumMeasuredShift)
             {
@@ -118,6 +121,14 @@ public static class VerticalStitcher
             }
 
             shifts[index - 1] = shift;
+            compositionSourceRows[index - 1] = alignment.CompositionSourceY >= 0
+                ? alignment.CompositionSourceY
+                : FindCompositionSourceY(
+                    frames[index - 1].Image,
+                    frames[index].Image,
+                    shift,
+                    index,
+                    cancellationToken);
             rowsToAppend[index - 1] = appendRows;
             outputHeight = checked(outputHeight + appendRows);
             EnsureOutputFits(width, outputHeight, maxPixels);
@@ -156,14 +167,18 @@ public static class VerticalStitcher
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     int newRows = rowsToAppend[index - 1];
-                    int sourceY = height - shifts[index - 1];
+                    int sourceY = compositionSourceRows[index - 1];
+                    int replacedRows = height - shifts[index - 1] - sourceY;
+                    int copiedRows = replacedRows + newRows;
+                    // Replace the old overlap below a verified content row. In particular,
+                    // a fixed footer in the previous frame must give way to revealed content.
                     graphics.DrawImage(
                         frames[index].Image,
-                        new Rectangle(0, destinationY, width, newRows),
+                        new Rectangle(0, destinationY - replacedRows, width, copiedRows),
                         0,
                         sourceY,
                         width,
-                        newRows,
+                        copiedRows,
                         GraphicsUnit.Pixel);
                     destinationY += newRows;
                 }
@@ -231,6 +246,15 @@ public static class VerticalStitcher
         CapturedFrame previous,
         CapturedFrame current,
         int currentFrameIndex,
+        CancellationToken cancellationToken) =>
+        MeasureVerticalAlignment(previous, current, currentFrameIndex, cancellationToken).Shift;
+
+    private readonly record struct VerticalAlignment(int Shift, int CompositionSourceY);
+
+    private static VerticalAlignment MeasureVerticalAlignment(
+        CapturedFrame previous,
+        CapturedFrame current,
+        int currentFrameIndex,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -295,8 +319,8 @@ public static class VerticalStitcher
         int minimumShift = Math.Max(1, predictedShift - searchRadius);
         int maximumSearchShift = Math.Min(maximumShift, predictedShift + searchRadius);
 
-        PixelBuffer previousPixels = PixelBuffer.Create(previous.Image, cancellationToken);
-        PixelBuffer currentPixels = PixelBuffer.Create(current.Image, cancellationToken);
+        using PixelBuffer previousPixels = PixelBuffer.Create(previous.Image, cancellationToken);
+        using PixelBuffer currentPixels = PixelBuffer.Create(current.Image, cancellationToken);
 
         int ignoredRightPixels = Math.Min(Math.Max(18, width / 40), Math.Max(0, width / 4));
         int firstX = Math.Min(3, Math.Max(0, width - 1));
@@ -322,6 +346,26 @@ public static class VerticalStitcher
         int minimumMovingSampleCount = Math.Max(
             12,
             (int)Math.Ceiling(sampledPointCount * minimumMovingSampleFraction));
+        bool expandedOverlap = movingSamplePoints.Count < minimumMovingSampleCount;
+        if (expandedOverlap)
+        {
+            // The overlap shared by every candidate may contain only a fixed header.
+            // Candidates with smaller shifts can still have useful content below it.
+            // Keep the ordinary scoring window unchanged when it already has evidence.
+            movingSamplePoints = FindMovingSamplePoints(
+                previousPixels,
+                currentPixels,
+                height - minimumShift,
+                firstX,
+                exclusiveLastX,
+                cancellationToken,
+                out sampledPointCount,
+                out verticalSampleStride);
+            minimumMovingSampleCount = Math.Max(
+                12,
+                (int)Math.Ceiling(sampledPointCount * minimumMovingSampleFraction));
+        }
+
         if (movingSamplePoints.Count < minimumMovingSampleCount)
         {
             throw SeamFailure(
@@ -330,6 +374,12 @@ public static class VerticalStitcher
         }
 
         int candidateCount = maximumSearchShift - minimumShift + 1;
+        // Wider candidate overlaps can reach the old footer. Only mask a contiguous
+        // bottom band here; individually stationary background pixels must remain
+        // negative evidence against incorrect shifts in the ordinary scoring window.
+        int exclusiveLastPreviousRow = expandedOverlap
+            ? height - CountStationaryBottomRows(previousPixels, currentPixels, cancellationToken)
+            : height;
         double[] scores = new double[candidateCount];
         int bestShift = -1;
         double bestScore = double.PositiveInfinity;
@@ -342,6 +392,8 @@ public static class VerticalStitcher
                 currentPixels,
                 shift,
                 movingSamplePoints,
+                minimumMovingSampleCount,
+                exclusiveLastPreviousRow,
                 cancellationToken);
             scores[shift - minimumShift] = score;
 
@@ -409,7 +461,14 @@ public static class VerticalStitcher
                 $"alternate shift {secondBasinShift}px, error {secondBasinScore:0.##})");
         }
 
-        return bestShift;
+        return new VerticalAlignment(
+            bestShift,
+            FindCompositionSourceY(
+                previousPixels,
+                currentPixels,
+                bestShift,
+                currentFrameIndex,
+                cancellationToken));
     }
 
     private static List<(int X, int Y)> FindMovingSamplePoints(
@@ -477,6 +536,8 @@ public static class VerticalStitcher
         PixelBuffer current,
         int shift,
         IReadOnlyList<(int X, int Y)> samplePoints,
+        int minimumMovingSampleCount,
+        int exclusiveLastPreviousRow,
         CancellationToken cancellationToken)
     {
         long totalDifference = 0;
@@ -490,6 +551,11 @@ public static class VerticalStitcher
             }
 
             (int x, int currentY) = samplePoints[index];
+            if (currentY + shift >= exclusiveLastPreviousRow)
+            {
+                continue;
+            }
+
             int previousOffset = previous.GetOffset(x, currentY + shift);
             int currentOffset = current.GetOffset(x, currentY);
             int pixelDifference =
@@ -502,10 +568,129 @@ public static class VerticalStitcher
             comparedChannels += 3;
         }
 
-        return comparedChannels == 0
+        return comparedChannels < minimumMovingSampleCount * 3
             ? double.PositiveInfinity
             : (double)totalDifference / comparedChannels;
     }
+
+    private static int FindCompositionSourceY(
+        Bitmap previous,
+        Bitmap current,
+        int shift,
+        int currentFrameIndex,
+        CancellationToken cancellationToken)
+    {
+        using PixelBuffer previousPixels = PixelBuffer.Create(previous, cancellationToken);
+        using PixelBuffer currentPixels = PixelBuffer.Create(current, cancellationToken);
+        return FindCompositionSourceY(
+            previousPixels, currentPixels, shift, currentFrameIndex, cancellationToken);
+    }
+
+    private static int FindCompositionSourceY(
+        PixelBuffer previous,
+        PixelBuffer current,
+        int shift,
+        int currentFrameIndex,
+        CancellationToken cancellationToken)
+    {
+        int ignoredRightPixels = Math.Min(Math.Max(18, current.Width / 40), Math.Max(0, current.Width / 4));
+        int firstX = Math.Min(3, Math.Max(0, current.Width - 1));
+        int availableColumns = current.Width - ignoredRightPixels - firstX;
+        int columnSamples = Math.Min(80, availableColumns);
+
+        for (int y = current.Height - shift - 1; y >= 0; y--)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            int movingPoints = 0;
+            long totalDifference = 0;
+            long wholeRowDifference = 0;
+            for (int column = 0; column < columnSamples; column++)
+            {
+                int x = firstX + (columnSamples == 1
+                    ? 0
+                    : (int)((long)column * (availableColumns - 1) / (columnSamples - 1)));
+                int currentOffset = current.GetOffset(x, y);
+                int previousOffset = previous.GetOffset(x, y + shift);
+                int pixelDifference =
+                    Math.Abs(previous.Pixels[previousOffset] - current.Pixels[currentOffset]) +
+                    Math.Abs(previous.Pixels[previousOffset + 1] - current.Pixels[currentOffset + 1]) +
+                    Math.Abs(previous.Pixels[previousOffset + 2] - current.Pixels[currentOffset + 2]);
+                int contribution = Math.Min(pixelDifference, MaximumPixelErrorContribution);
+                wholeRowDifference += contribution;
+                if (LargestChannelDifference(previous, previous.GetOffset(x, y), current, currentOffset)
+                    <= StationaryPixelTolerance)
+                {
+                    continue;
+                }
+
+                movingPoints++;
+                totalDifference += contribution;
+            }
+
+            // A stationary header/footer or a blank margin alone cannot establish a seam.
+            // Select the last row whose moving detail actually matches after alignment.
+            // Also check the whole row: a single animated footer pixel must not
+            // validate a join when the remaining aligned row is still occluded.
+            if (movingPoints > 0
+                && (double)totalDifference / (movingPoints * 3) <= MaximumAcceptablePixelError
+                && (double)wholeRowDifference / (columnSamples * 3) <= MaximumAcceptablePixelError)
+            {
+                return y;
+            }
+        }
+
+        throw SeamFailure(
+            currentFrameIndex,
+            "there was no verified moving content at which to join the frames without repeating fixed content");
+    }
+
+    private static int CountStationaryBottomRows(
+        PixelBuffer previous,
+        PixelBuffer current,
+        CancellationToken cancellationToken)
+    {
+        int ignoredRightPixels = Math.Min(Math.Max(18, current.Width / 40), Math.Max(0, current.Width / 4));
+        int firstX = Math.Min(3, Math.Max(0, current.Width - 1));
+        int availableColumns = current.Width - ignoredRightPixels - firstX;
+        int columnSamples = Math.Min(80, availableColumns);
+        int stationaryRows = 0;
+        for (int y = current.Height - 1; y >= 0; y--)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            int matchingColumns = 0;
+            for (int column = 0; column < columnSamples; column++)
+            {
+                int x = firstX + (columnSamples == 1
+                    ? 0
+                    : (int)((long)column * (availableColumns - 1) / (columnSamples - 1)));
+                if (LargestChannelDifference(previous, previous.GetOffset(x, y), current, current.GetOffset(x, y))
+                    <= StationaryPixelTolerance)
+                {
+                    matchingColumns++;
+                }
+            }
+
+            if (matchingColumns < Math.Ceiling(columnSamples * 0.95))
+            {
+                break;
+            }
+
+            stationaryRows++;
+        }
+
+        return stationaryRows;
+    }
+
+    private static int LargestChannelDifference(
+        PixelBuffer first,
+        int firstOffset,
+        PixelBuffer second,
+        int secondOffset) =>
+        Math.Max(
+            Math.Abs(first.Pixels[firstOffset] - second.Pixels[secondOffset]),
+            Math.Max(
+                Math.Abs(first.Pixels[firstOffset + 1] - second.Pixels[secondOffset + 1]),
+                Math.Abs(first.Pixels[firstOffset + 2] - second.Pixels[secondOffset + 2])));
 
     private static InvalidOperationException SeamFailure(int currentFrameIndex, string reason)
     {
@@ -553,8 +738,10 @@ public static class VerticalStitcher
         }
     }
 
-    private sealed class PixelBuffer
+    private sealed class PixelBuffer : IDisposable
     {
+        private bool _disposed;
+
         private PixelBuffer(byte[] pixels, int width, int height)
         {
             Pixels = pixels;
@@ -570,28 +757,48 @@ public static class VerticalStitcher
 
         public int GetOffset(int x, int y) => ((y * Width) + x) * 4;
 
+        public void Dispose()
+        {
+            if (!_disposed)
+            {
+                ArrayPool<byte>.Shared.Return(Pixels);
+                _disposed = true;
+            }
+        }
+
         public static PixelBuffer Create(Bitmap source, CancellationToken cancellationToken)
         {
-            using Bitmap normalized = CloneAsArgb(source, cancellationToken);
-            Rectangle bounds = new(0, 0, normalized.Width, normalized.Height);
-            BitmapData data = normalized.LockBits(bounds, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            cancellationToken.ThrowIfCancellationRequested();
+            using Bitmap? normalized = source.PixelFormat == PixelFormat.Format32bppArgb
+                ? null
+                : CloneAsArgb(source, cancellationToken);
+            Bitmap readable = normalized ?? source;
+            Rectangle bounds = new(0, 0, readable.Width, readable.Height);
+            BitmapData data = readable.LockBits(bounds, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+            byte[]? pixels = null;
 
             try
             {
-                int rowBytes = checked(normalized.Width * 4);
-                byte[] pixels = new byte[checked(rowBytes * normalized.Height)];
-                for (int y = 0; y < normalized.Height; y++)
+                int rowBytes = checked(readable.Width * 4);
+                pixels = ArrayPool<byte>.Shared.Rent(checked(rowBytes * readable.Height));
+                for (int y = 0; y < readable.Height; y++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     IntPtr sourceRow = IntPtr.Add(data.Scan0, y * data.Stride);
                     Marshal.Copy(sourceRow, pixels, y * rowBytes, rowBytes);
                 }
 
-                return new PixelBuffer(pixels, normalized.Width, normalized.Height);
+                PixelBuffer result = new(pixels, readable.Width, readable.Height);
+                pixels = null;
+                return result;
             }
             finally
             {
-                normalized.UnlockBits(data);
+                readable.UnlockBits(data);
+                if (pixels is not null)
+                {
+                    ArrayPool<byte>.Shared.Return(pixels);
+                }
             }
         }
     }

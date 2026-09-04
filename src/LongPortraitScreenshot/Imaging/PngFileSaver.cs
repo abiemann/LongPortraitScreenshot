@@ -18,16 +18,24 @@ internal static class PngFileSaver
 
         string temporaryPath = Path.Combine(
             directory,
-            $".{Path.GetFileName(fullPath)}.{Guid.NewGuid():N}.tmp");
+            Path.ChangeExtension(Path.GetRandomFileName(), ".tmp"));
+        bool temporaryFileCreated = false;
 
         try
         {
-            image.Save(temporaryPath, ImageFormat.Png);
+            // GDI+ path-based encoding still applies legacy path limits. The
+            // stream API also permits long destination directories and names.
+            using (FileStream stream = new(temporaryPath, FileMode.CreateNew, FileAccess.Write))
+            {
+                temporaryFileCreated = true;
+                image.Save(stream, ImageFormat.Png);
+            }
+
             File.Move(temporaryPath, fullPath, true);
         }
         finally
         {
-            if (File.Exists(temporaryPath))
+            if (temporaryFileCreated && File.Exists(temporaryPath))
             {
                 File.Delete(temporaryPath);
             }

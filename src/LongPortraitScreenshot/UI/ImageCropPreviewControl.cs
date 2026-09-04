@@ -17,7 +17,8 @@ internal sealed class ImageCropPreviewControl : ScrollableControl
     private CropEdge _dragEdge;
     private Rectangle _dragStartBounds;
     private Point _lastDragPoint;
-    private int _dragCoordinateOffset;
+    private double _dragStartPointerCoordinate;
+    private int _dragStartEdgeCoordinate;
     private double _zoom = 1.0;
 
     public ImageCropPreviewControl(Bitmap image)
@@ -126,8 +127,7 @@ internal sealed class ImageCropPreviewControl : ScrollableControl
         _dragEdge = edge;
         _dragStartBounds = Selection.Bounds;
         _lastDragPoint = e.Location;
-        _dragCoordinateOffset = GetPointerCoordinate(edge, e.Location)
-            - GetEdgeClientCoordinate(edge);
+        SetDragOrigin(e.Location);
         Capture = true;
         _dragScrollTimer.Start();
     }
@@ -260,6 +260,13 @@ internal sealed class ImageCropPreviewControl : ScrollableControl
             : 0;
 
         AutoScrollPosition = new Point(horizontalScroll, verticalScroll);
+        if (_dragEdge != CropEdge.None)
+        {
+            // Zooming changes the pointer's source coordinate, but must not edit
+            // the crop until the pointer moves again.
+            SetDragOrigin(_lastDragPoint);
+        }
+
         ZoomChanged?.Invoke(this, EventArgs.Empty);
         Invalidate();
     }
@@ -522,15 +529,15 @@ internal sealed class ImageCropPreviewControl : ScrollableControl
         return CropEdge.None;
     }
 
-    private int GetEdgeClientCoordinate(CropEdge edge)
+    private void SetDragOrigin(Point location)
     {
-        Rectangle selectionRectangle = ImageToClient(Selection.Bounds, GetImageRectangle());
-        return edge switch
+        _dragStartPointerCoordinate = GetPointerImageCoordinate(_dragEdge, location);
+        _dragStartEdgeCoordinate = _dragEdge switch
         {
-            CropEdge.Left => selectionRectangle.Left,
-            CropEdge.Right => selectionRectangle.Right,
-            CropEdge.Top => selectionRectangle.Top,
-            CropEdge.Bottom => selectionRectangle.Bottom,
+            CropEdge.Left => Selection.Bounds.Left,
+            CropEdge.Right => Selection.Bounds.Right,
+            CropEdge.Top => Selection.Bounds.Top,
+            CropEdge.Bottom => Selection.Bounds.Bottom,
             _ => 0
         };
     }
@@ -538,18 +545,25 @@ internal sealed class ImageCropPreviewControl : ScrollableControl
     private static int GetPointerCoordinate(CropEdge edge, Point point) =>
         edge is CropEdge.Left or CropEdge.Right ? point.X : point.Y;
 
-    private void UpdateDrag(Point location)
+    private double GetPointerImageCoordinate(CropEdge edge, Point location)
     {
         Rectangle imageRectangle = GetImageRectangle();
-        double scale = _dragEdge is CropEdge.Left or CropEdge.Right
+        double scale = edge is CropEdge.Left or CropEdge.Right
             ? imageRectangle.Width / (double)_image.Width
             : imageRectangle.Height / (double)_image.Height;
-        int imageOrigin = _dragEdge is CropEdge.Left or CropEdge.Right
+        int imageOrigin = edge is CropEdge.Left or CropEdge.Right
             ? imageRectangle.Left
             : imageRectangle.Top;
-        int clientCoordinate = GetPointerCoordinate(_dragEdge, location) - _dragCoordinateOffset;
+        return (GetPointerCoordinate(edge, location) - imageOrigin) / scale;
+    }
+
+    private void UpdateDrag(Point location)
+    {
+        // Keep the original source edge exact. Inverting the rounded handle
+        // position can otherwise move it by many pixels in a fitted tall image.
         int imageCoordinate = (int)Math.Round(
-            (clientCoordinate - imageOrigin) / scale,
+            _dragStartEdgeCoordinate
+                + (GetPointerImageCoordinate(_dragEdge, location) - _dragStartPointerCoordinate),
             MidpointRounding.AwayFromZero);
         Selection.MoveEdge(_dragEdge, imageCoordinate);
     }
@@ -601,7 +615,8 @@ internal sealed class ImageCropPreviewControl : ScrollableControl
     {
         _dragScrollTimer.Stop();
         _dragEdge = CropEdge.None;
-        _dragCoordinateOffset = 0;
+        _dragStartPointerCoordinate = 0;
+        _dragStartEdgeCoordinate = 0;
         Cursor = GetCursor(HitTestHandle(PointToClient(MousePosition)));
         Invalidate();
     }

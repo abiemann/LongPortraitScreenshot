@@ -15,7 +15,6 @@ internal static class CaptureSession
     private const int EscapeVirtualKey = 0x1B;
     private const int MaximumFrames = 256;
     private const long MaximumRawFramePixels = 100_000_000;
-    private const double BottomScrollPercent = 99.95;
     private const double MinimumMovementPercent = 0.0001;
     private const int BoundsTolerancePixels = 2;
     private const int ScrollSettleTimeoutMilliseconds = 2_000;
@@ -23,7 +22,6 @@ internal static class CaptureSession
     private const int RenderDelayMilliseconds = 100;
     private const int MaximumIncrementalScrollAttempts = 256;
     private const int MaximumIncrementalScrollDurationMilliseconds = 20_000;
-    private const double RequestedPositionTolerancePercent = 0.25;
 
     public static CaptureResult Capture(
         ScrollTarget target,
@@ -116,7 +114,7 @@ internal static class CaptureSession
                 cancellationToken,
                 checkEscape: true);
 
-            if (currentScroll.VerticalScrollPercent > 0.25)
+            if (!ScrollPositionPolicy.IsRequestedPositionReached(currentScroll.VerticalScrollPercent, 0.0))
             {
                 throw new InvalidOperationException(
                     $"The target would not scroll to its top (it stopped at {currentScroll.VerticalScrollPercent:0.##}%). " +
@@ -251,12 +249,12 @@ internal static class CaptureSession
                         throw;
                     }
 
-                    if (currentScroll.VerticalScrollPercent >= BottomScrollPercent)
+                    if (ScrollPositionPolicy.IsAtBottom(currentScroll.VerticalScrollPercent))
                     {
                         break;
                     }
 
-                    double step = CalculateScrollPercentStep(currentScroll.VerticalViewSize);
+                    double step = ScrollPositionPolicy.CalculateScrollPercentStep(currentScroll.VerticalViewSize);
                     double requestedPercent = Math.Min(100.0, currentScroll.VerticalScrollPercent + step);
                     ScrollState nextScroll = MoveToScrollPercent(
                         target.ScrollPattern,
@@ -267,14 +265,11 @@ internal static class CaptureSession
                         ref useIncrementalScrolling,
                         cancellationToken,
                         checkEscape: true);
-                    double actualMovement = nextScroll.VerticalScrollPercent - currentScroll.VerticalScrollPercent;
-                    if (actualMovement <= MinimumMovementPercent)
+                    if (!ScrollPositionPolicy.HasDirectionalProgress(
+                        currentScroll.VerticalScrollPercent,
+                        nextScroll.VerticalScrollPercent,
+                        requestedPercent))
                     {
-                        if (currentScroll.VerticalScrollPercent >= 99.0)
-                        {
-                            break;
-                        }
-
                         throw new InvalidOperationException(
                             $"The selected control stopped scrolling at {currentScroll.VerticalScrollPercent:0.##}% before reaching the bottom. " +
                             "The control may use custom scrolling; try selecting a different ancestor.");
@@ -294,6 +289,15 @@ internal static class CaptureSession
                     processingToken,
                     finalFrameRowsToAppend,
                     options.Mode == CaptureMode.Full ? null : measuredVerticalShifts);
+                int frameCount = frames.Count;
+                // Composition owns an independent bitmap; release the viewports before
+                // either crop pass allocates another output-sized image.
+                foreach (CapturedFrame frame in frames)
+                {
+                    frame.Image.Dispose();
+                }
+                frames.Clear();
+
                 if (options.CropVerticalScrollIndicator)
                 {
                     processingToken.ThrowIfCancellationRequested();
@@ -316,7 +320,7 @@ internal static class CaptureSession
                 CaptureResult result = new(
                     stitched,
                     string.IsNullOrWhiteSpace(target.DisplayName) ? "Scrolling control" : target.DisplayName,
-                    frames.Count,
+                    frameCount,
                     isPartial);
                 stitched = null;
                 return result;
@@ -362,19 +366,6 @@ internal static class CaptureSession
                 // Cursor restoration must not hide the capture's primary result or failure.
             }
         }
-    }
-
-    private static double CalculateScrollPercentStep(double viewSize)
-    {
-        if (viewSize <= 0.0 || viewSize >= 100.0 || !double.IsFinite(viewSize))
-        {
-            throw new InvalidOperationException(
-                $"The target reported an invalid vertical view size ({viewSize:0.###}%). Try a different scrolling container.");
-        }
-
-        // ScrollPercent spans the scrollable range, not the full content height. This converts
-        // 65% of one viewport into that coordinate system and leaves ample image overlap.
-        return 65.0 * viewSize / (100.0 - viewSize);
     }
 
     private static ScrollState WaitForScrollToSettle(
@@ -472,8 +463,8 @@ internal static class CaptureSession
                     checkEscape);
 
                 bool requestSatisfied = requireRequestedPosition
-                    ? IsRequestedPositionReached(settled.VerticalScrollPercent, requestedVerticalPercent)
-                    : HasDirectionalProgress(
+                    ? ScrollPositionPolicy.IsRequestedPositionReached(settled.VerticalScrollPercent, requestedVerticalPercent)
+                    : ScrollPositionPolicy.HasDirectionalProgress(
                         start.VerticalScrollPercent,
                         settled.VerticalScrollPercent,
                         requestedVerticalPercent);
@@ -522,7 +513,7 @@ internal static class CaptureSession
                 && stopwatch.ElapsedMilliseconds < MaximumIncrementalScrollDurationMilliseconds;
             attempt++)
         {
-            if (HasReachedRequestedPercent(
+            if (ScrollPositionPolicy.HasReachedRequestedPercent(
                 start.VerticalScrollPercent,
                 current.VerticalScrollPercent,
                 requestedVerticalPercent))
@@ -549,7 +540,7 @@ internal static class CaptureSession
                 cancellationToken,
                 checkEscape);
 
-            if (!HasDirectionalProgress(
+            if (!ScrollPositionPolicy.HasDirectionalProgress(
                 current.VerticalScrollPercent,
                 next.VerticalScrollPercent,
                 requestedVerticalPercent))
@@ -568,8 +559,7 @@ internal static class CaptureSession
         double requestedVerticalPercent,
         bool requireRequestedPosition)
     {
-        bool requestedEndpoint = requestedVerticalPercent <= RequestedPositionTolerancePercent
-            || requestedVerticalPercent >= 100.0 - RequestedPositionTolerancePercent;
+        bool requestedEndpoint = ScrollPositionPolicy.IsEndpoint(requestedVerticalPercent);
         if (requireRequestedPosition && requestedEndpoint)
         {
             return direction > 0
@@ -580,31 +570,6 @@ internal static class CaptureSession
         return direction > 0
             ? ScrollAmount.SmallIncrement
             : ScrollAmount.SmallDecrement;
-    }
-
-    private static bool IsRequestedPositionReached(
-        double currentPercent,
-        double requestedPercent) =>
-        Math.Abs(currentPercent - requestedPercent) <= RequestedPositionTolerancePercent;
-
-    private static bool HasDirectionalProgress(
-        double startPercent,
-        double currentPercent,
-        double requestedPercent)
-    {
-        int direction = Math.Sign(requestedPercent - startPercent);
-        return direction == 0
-            || direction * (currentPercent - startPercent) > MinimumMovementPercent;
-    }
-
-    private static bool HasReachedRequestedPercent(
-        double startPercent,
-        double currentPercent,
-        double requestedPercent)
-    {
-        int direction = Math.Sign(requestedPercent - startPercent);
-        return direction == 0
-            || direction * (currentPercent - requestedPercent) >= -RequestedPositionTolerancePercent;
     }
 
     private static ScrollState ReadScrollState(ScrollPattern scrollPattern)
