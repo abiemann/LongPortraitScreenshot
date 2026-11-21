@@ -20,6 +20,134 @@ internal static class ImagingRegressionTests
         AnimatedFooterPixelCannotEstablishCompositionSeam();
         FixedChromeWithoutSharedContentIsRejected();
         MeasurementCancellationLeavesSourcesUsable();
+        BrowserScrollMetadataCanDisagreeWithOnlyOneFrame();
+        ActualScrollCanExceedThePredictedSearchWindow();
+        TwoEquallyGoodDistantOffsetsAreRejected();
+        MatchingOnlyTheTopOfThePageIsRejected();
+        MovingSidebarOnStationaryContentIsRejected();
+    }
+
+    private static void BrowserScrollMetadataCanDisagreeWithOnlyOneFrame()
+    {
+        // Edge reported equal percentage steps on this viewport. The page moved
+        // 965 pixels on the first step and only 60 on the next one.
+        const int width = 151;
+        const int height = 1485;
+        const double viewSize = 12.052593;
+        using Bitmap page = CreateTexturedPage(width, height + 1025);
+        using Bitmap first = page.Clone(new Rectangle(0, 0, width, height), page.PixelFormat);
+        using Bitmap second = page.Clone(new Rectangle(0, 965, width, height), page.PixelFormat);
+        using Bitmap third = page.Clone(new Rectangle(0, 1025, width, height), page.PixelFormat);
+        foreach (Bitmap image in new[] { page, first, second, third })
+        {
+            PaintChrome(image, headerRows: 105, footerRows: 30);
+        }
+
+        using Bitmap result = VerticalStitcher.Stitch([
+            new CapturedFrame(first, 0, viewSize),
+            new CapturedFrame(second, 8.9055, viewSize),
+            new CapturedFrame(third, 17.811, viewSize)]);
+        AssertEqual(page, result, "unequal pixel shifts for equal reported scroll steps");
+    }
+
+    private static void ActualScrollCanExceedThePredictedSearchWindow()
+    {
+        const int width = 89;
+        const int height = 500;
+        using Bitmap page = CreateTexturedPage(width, height + 380);
+        using Bitmap first = page.Clone(new Rectangle(0, 0, width, height), page.PixelFormat);
+        using Bitmap second = page.Clone(new Rectangle(0, 380, width, height), page.PixelFormat);
+        // A 20% step across a 500-pixel scroll range predicts only 100 pixels.
+        using Bitmap result = VerticalStitcher.Stitch([
+            new CapturedFrame(first, 0, 50), new CapturedFrame(second, 20, 50)]);
+        AssertEqual(page, result, "actual movement above predicted search window");
+    }
+
+    private static void TwoEquallyGoodDistantOffsetsAreRejected()
+    {
+        const int width = 103;
+        const int height = 600;
+        using Bitmap tile = CreateTexturedPage(width, 256);
+        using Bitmap page = new(width, height + 40, PixelFormat.Format32bppArgb);
+        using (Graphics graphics = Graphics.FromImage(page))
+        {
+            for (int y = 0; y < page.Height; y += tile.Height)
+            {
+                graphics.DrawImageUnscaled(tile, 0, y);
+            }
+        }
+
+        using Bitmap first = page.Clone(new Rectangle(0, 0, width, height), page.PixelFormat);
+        using Bitmap second = page.Clone(new Rectangle(0, 40, width, height), page.PixelFormat);
+        // The metadata predicts 168. Both 40 and 296 match exactly outside the search window.
+        AssertSeamRejected(first, second, 28, "Two indistinguishable offsets outside the prediction must not be stitched.");
+    }
+
+    private static void MatchingOnlyTheTopOfThePageIsRejected()
+    {
+        const int height = 700;
+        const int width = 117;
+        using Bitmap first = CreateTexturedPage(width, height);
+        using Bitmap second = CreateTexturedPage(width, height, seed: 835);
+        using (Graphics graphics = Graphics.FromImage(second))
+        {
+            // Only the top panel shares content. It moves by 35px while the rest
+            // of the viewport has been replaced entirely.
+            graphics.DrawImage(first, new Rectangle(0, 0, width, 180),
+                new Rectangle(0, 35, width, 180), GraphicsUnit.Pixel);
+        }
+
+        AssertSeamRejected(first, second, 65, "Matching a top panel alone must not certify a whole-page shift.");
+    }
+
+    private static void MovingSidebarOnStationaryContentIsRejected()
+    {
+        const int width = 171, height = 600, shift = 35, sidebar = 30;
+        using Bitmap first = CreateTexturedPage(width, height);
+        // Even one coincidentally suitable composition row cannot prove that the page moved.
+        for (int x = sidebar; x < width; x++)
+        {
+            first.SetPixel(x, height - 1, first.GetPixel(x, height - shift - 1));
+        }
+
+        using Bitmap second = (Bitmap)first.Clone();
+        using (Graphics graphics = Graphics.FromImage(second))
+        {
+            graphics.DrawImage(first, new Rectangle(0, 0, sidebar, height - shift),
+                new Rectangle(0, shift, sidebar, height - shift), GraphicsUnit.Pixel);
+        }
+
+        AssertSeamRejected(first, second, 65, "A moving sidebar beside a stationary page must not establish a shift.");
+    }
+
+    private static void AssertSeamRejected(Bitmap first, Bitmap second, double reportedPercent, string message)
+    {
+        try
+        {
+            using Bitmap result = VerticalStitcher.Stitch([
+                new CapturedFrame(first, 0, 50), new CapturedFrame(second, reportedPercent, 50)]);
+        }
+        catch (InvalidOperationException exception) when (exception.Message.Contains("confidently stitch", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(message);
+    }
+
+    private static Bitmap CreateTexturedPage(int width, int height, int seed = 596)
+    {
+        Random random = new(seed);
+        Bitmap bitmap = new(width, height, PixelFormat.Format32bppArgb);
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                bitmap.SetPixel(x, y, Color.FromArgb(random.Next(256), random.Next(256), random.Next(256)));
+            }
+        }
+
+        return bitmap;
     }
 
     private static void FixedChromeIsComposedOnce(

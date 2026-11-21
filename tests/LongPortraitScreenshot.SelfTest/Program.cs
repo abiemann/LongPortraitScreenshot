@@ -49,6 +49,7 @@ internal static class Program
             ScrollSettleRestartsWhenRenderCheckMoves();
             ScrollSettleRejectsNeverMovingRequest();
             ScrollSettleAllowsAlreadySatisfiedRequest();
+            StaleAbsoluteScrollCanBeRepeatedOnce();
 
             ImagingRegressionTests.Run();
             UiSaveRegressionTests.Run();
@@ -1006,6 +1007,24 @@ internal static class Program
         Require(!tracker.Observe(20), "One stable poll is insufficient after movement.");
         Require(tracker.Observe(20), "Two stable polls should request a render confirmation.");
         Require(tracker.ConfirmAfterRender(20), "An unchanged render confirmation should settle.");
+    }
+
+    private static void StaleAbsoluteScrollCanBeRepeatedOnce()
+    {
+        ScrollSettleTracker stale = new(9, 18, 9, 0.0001);
+        Require(!stale.Observe(9) && !stale.TryBeginAbsoluteRetry(50),
+            "Give an asynchronous provider time to start scrolling.");
+        Require(!stale.Observe(9) && stale.TryBeginAbsoluteRetry(350)
+            && !stale.TryBeginAbsoluteRetry(500),
+            "A stale position must allow one repeat of the same absolute request.");
+        Require(!stale.Observe(18) && !stale.Observe(18) && stale.Observe(18)
+            && stale.ConfirmAfterRender(18), "The repeated request must settle at its destination.");
+
+        ScrollSettleTracker moving = new(9, 18, 9, 0.0001);
+        moving.Observe(12);
+        Require(!moving.TryBeginAbsoluteRetry(500), "Do not restart a scroll that has begun moving.");
+        ScrollSettleTracker satisfied = new(9, 9, 9, 0.0001);
+        Require(!satisfied.TryBeginAbsoluteRetry(500), "An already satisfied request needs no retry.");
     }
 
     private static void ScrollSettleRestartsWhenRenderCheckMoves()

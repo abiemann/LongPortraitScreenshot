@@ -330,6 +330,29 @@ public static class VerticalStitcher
             throw SeamFailure(currentFrameIndex, "the selected control is too narrow to compare its content reliably");
         }
 
+        int shift = FindExpectedShift(previousPixels, currentPixels, predictedShift, minimumShift, maximumSearchShift,
+            firstX, exclusiveLastX, cancellationToken, out string? failure);
+        if (failure is not null)
+        {
+            shift = FindShiftOutsidePrediction(previousPixels, currentPixels, maximumShift, minimumShift,
+                maximumSearchShift, firstX, exclusiveLastX, cancellationToken);
+            if (shift < 1)
+            {
+                throw SeamFailure(currentFrameIndex, failure);
+            }
+        }
+
+        return new VerticalAlignment(shift,
+            FindCompositionSourceY(previousPixels, currentPixels, shift, currentFrameIndex, cancellationToken));
+    }
+
+    private static int FindExpectedShift(
+        PixelBuffer previousPixels, PixelBuffer currentPixels, int predictedShift, int minimumShift,
+        int maximumSearchShift, int firstX, int exclusiveLastX, CancellationToken cancellationToken,
+        out string? failure)
+    {
+        failure = null;
+        int height = currentPixels.Height;
         int commonOverlap = height - maximumSearchShift;
         List<(int X, int Y)> movingSamplePoints = FindMovingSamplePoints(
             previousPixels,
@@ -368,9 +391,8 @@ public static class VerticalStitcher
 
         if (movingSamplePoints.Count < minimumMovingSampleCount)
         {
-            throw SeamFailure(
-                currentFrameIndex,
-                "the overlap did not contain enough moving visual detail to distinguish it from fixed content");
+            failure = "the overlap did not contain enough moving visual detail to distinguish it from fixed content";
+            return -1;
         }
 
         int candidateCount = maximumSearchShift - minimumShift + 1;
@@ -409,9 +431,8 @@ public static class VerticalStitcher
 
         if (bestShift < 1 || bestScore > MaximumAcceptablePixelError)
         {
-            throw SeamFailure(
-                currentFrameIndex,
-                $"the best overlap had too much visual difference (error {bestScore:0.##})");
+            failure = $"the best overlap had too much visual difference (error {bestScore:0.##})";
+            return -1;
         }
 
         double requiredConfidenceGap = Math.Max(0.45, bestScore * 0.08);
@@ -454,21 +475,107 @@ public static class VerticalStitcher
 
         if (double.IsFinite(secondBasinScore) && secondBasinScore - bestScore < requiredConfidenceGap)
         {
-            throw SeamFailure(
-                currentFrameIndex,
-                $"more than one overlap looked equally likely " +
+            failure = $"more than one overlap looked equally likely " +
                 $"(best shift {bestShift}px, error {bestScore:0.##}; " +
-                $"alternate shift {secondBasinShift}px, error {secondBasinScore:0.##})");
+                $"alternate shift {secondBasinShift}px, error {secondBasinScore:0.##})";
+            return -1;
         }
 
-        return new VerticalAlignment(
-            bestShift,
-            FindCompositionSourceY(
-                previousPixels,
-                currentPixels,
-                bestShift,
-                currentFrameIndex,
-                cancellationToken));
+        return bestShift;
+    }
+
+    private static int FindShiftOutsidePrediction(
+        PixelBuffer previous, PixelBuffer current, int maximumShift, int expectedMinimum, int expectedMaximum,
+        int firstX, int exclusiveLastX, CancellationToken cancellationToken)
+    {
+        if (expectedMinimum == 1 && expectedMaximum == maximumShift)
+        {
+            return -1;
+        }
+
+        // A provider can report a page scroll while the rendered content only moves a few rows.
+        // Search every supported shift, including the original range so repeated matches compete.
+        int height = current.Height;
+        List<(int X, int Y)> moving = FindMovingSamplePoints(previous, current, height, firstX,
+            exclusiveLastX, cancellationToken, out int gridSize, out _);
+        const int minimumPoints = 36;
+        if (moving.Count < minimumPoints)
+        {
+            return -1;
+        }
+
+        int lastRow = height - CountStationaryBottomRows(previous, current, cancellationToken);
+        int bestShift = -1;
+        double best = double.PositiveInfinity;
+        double nextBest = double.PositiveInfinity;
+        for (int shift = 1; shift <= maximumShift && shift < lastRow; shift++)
+        {
+            int required = Math.Max(minimumPoints, (int)Math.Ceiling(gridSize * 0.02 * (lastRow - shift) / height));
+            double score = CalculateScore(previous, current, shift, moving, required, lastRow, cancellationToken);
+            if (score < best)
+            {
+                nextBest = best;
+                best = score;
+                bestShift = shift;
+            }
+            else if (score < nextBest)
+            {
+                nextBest = score;
+            }
+        }
+
+        if (bestShift < 1 || (bestShift >= expectedMinimum && bestShift <= expectedMaximum)
+            || best > MaximumAcceptablePixelError || nextBest - best < Math.Max(1.0, best * 0.08))
+        {
+            return -1;
+        }
+
+        int overlap = height - bestShift;
+        int columns = Math.Min(48, exclusiveLastX - firstX);
+        int supportedBands = 0;
+        for (int band = 0; band < 4; band++)
+        {
+            int startY = (int)((long)overlap * band / 4);
+            int endY = Math.Min((int)((long)overlap * (band + 1) / 4), lastRow - bestShift);
+            int rows = Math.Min(24, endY - startY);
+            int movingCount = 0, matchingCount = 0, matchingRows = 0;
+            long totalDifference = 0;
+
+            // Verify with a separate grid over the actual overlap. A scrolling sidebar can
+            // match at every height while the stationary, textured body refutes that shift.
+            for (int row = 0; row < rows; row++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                int y = startY + (int)((2L * row + 1) * (endY - startY) / (2 * rows));
+                int matchesBeforeRow = matchingCount;
+                for (int column = 0; column < columns; column++)
+                {
+                    int x = firstX + (int)((2L * column + 1) * (exclusiveLastX - firstX) / (2 * columns));
+                    int aligned = previous.GetOffset(x, y + bestShift);
+                    int currentOffset = current.GetOffset(x, y);
+                    totalDifference += PixelDifference(previous, aligned, current, currentOffset);
+                    if (LargestChannelDifference(previous, previous.GetOffset(x, y), current, currentOffset)
+                        > StationaryPixelTolerance)
+                    {
+                        movingCount++;
+                        if (LargestChannelDifference(previous, aligned, current, currentOffset) <= StationaryPixelTolerance * 2)
+                        {
+                            matchingCount++;
+                        }
+                    }
+                }
+
+                if (matchingCount > matchesBeforeRow) matchingRows++;
+            }
+
+            if (movingCount >= 12 && matchingRows >= 2 && matchingCount >= movingCount * 0.7
+                && totalDifference <= (long)MaximumAcceptablePixelError * rows * columns * 3)
+            {
+                supportedBands++;
+            }
+        }
+
+        return supportedBands >= 3 ? bestShift : -1;
     }
 
     private static List<(int X, int Y)> FindMovingSamplePoints(
@@ -553,15 +660,13 @@ public static class VerticalStitcher
             (int x, int currentY) = samplePoints[index];
             if (currentY + shift >= exclusiveLastPreviousRow)
             {
-                continue;
+                // FindMovingSamplePoints emits points in row order.
+                break;
             }
 
             int previousOffset = previous.GetOffset(x, currentY + shift);
             int currentOffset = current.GetOffset(x, currentY);
-            int pixelDifference =
-                Math.Abs(previous.Pixels[previousOffset] - current.Pixels[currentOffset]) +
-                Math.Abs(previous.Pixels[previousOffset + 1] - current.Pixels[currentOffset + 1]) +
-                Math.Abs(previous.Pixels[previousOffset + 2] - current.Pixels[currentOffset + 2]);
+            int pixelDifference = PixelDifference(previous, previousOffset, current, currentOffset);
 
             // Keep a small animated or lazy-loaded region from dominating an otherwise exact seam.
             totalDifference += Math.Min(pixelDifference, MaximumPixelErrorContribution);
@@ -680,6 +785,11 @@ public static class VerticalStitcher
 
         return stationaryRows;
     }
+
+    private static int PixelDifference(PixelBuffer first, int firstOffset, PixelBuffer second, int secondOffset) =>
+        Math.Abs(first.Pixels[firstOffset] - second.Pixels[secondOffset]) +
+        Math.Abs(first.Pixels[firstOffset + 1] - second.Pixels[secondOffset + 1]) +
+        Math.Abs(first.Pixels[firstOffset + 2] - second.Pixels[secondOffset + 2]);
 
     private static int LargestChannelDifference(
         PixelBuffer first,

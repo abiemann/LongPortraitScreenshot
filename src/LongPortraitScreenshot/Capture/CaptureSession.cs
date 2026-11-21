@@ -373,7 +373,8 @@ internal static class CaptureSession
         double startPercent,
         double requestedPercent,
         CancellationToken cancellationToken,
-        bool checkEscape)
+        bool checkEscape,
+        double? absoluteHorizontalPercent = null)
     {
         Stopwatch stopwatch = Stopwatch.StartNew();
         ScrollState previous = ReadScrollState(scrollPattern);
@@ -398,6 +399,23 @@ internal static class CaptureSession
             }
 
             previous = current;
+            if (absoluteHorizontalPercent is double horizontal
+                && tracker.TryBeginAbsoluteRetry(stopwatch.ElapsedMilliseconds))
+            {
+                // Edge can keep reporting the previous position after an absolute scroll.
+                // Repeating the destination avoids adding an extra relative scroll.
+                ThrowIfCancelled(cancellationToken, checkEscape);
+                try
+                {
+                    SetScrollPercent(scrollPattern, horizontal, requestedPercent);
+                }
+                catch (InvalidOperationException)
+                {
+                    // The first request may still be rendering. Continue polling it;
+                    // the caller can use incremental scrolling if it never moves.
+                }
+            }
+
             if (readyForRenderCheck)
             {
                 Thread.Sleep(RenderDelayMilliseconds);
@@ -460,7 +478,8 @@ internal static class CaptureSession
                     start.VerticalScrollPercent,
                     requestedVerticalPercent,
                     cancellationToken,
-                    checkEscape);
+                    checkEscape,
+                    requestedHorizontalPercent);
 
                 bool requestSatisfied = requireRequestedPosition
                     ? ScrollPositionPolicy.IsRequestedPositionReached(settled.VerticalScrollPercent, requestedVerticalPercent)

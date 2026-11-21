@@ -2,11 +2,13 @@ namespace LongPortraitScreenshot.Capture;
 
 internal sealed class ScrollSettleTracker
 {
+    private const int AbsoluteRetryDelayMilliseconds = 300;
     private readonly double _startPercent;
     private readonly double _minimumMovementPercent;
     private readonly bool _movementRequired;
     private double _previousPercent;
     private int _stablePolls;
+    private bool _retriedAbsoluteRequest;
 
     public ScrollSettleTracker(
         double startPercent,
@@ -22,6 +24,18 @@ internal sealed class ScrollSettleTracker
     }
 
     public bool HasDepartedStart { get; private set; }
+
+    public bool TryBeginAbsoluteRetry(long elapsedMilliseconds)
+    {
+        if (!_movementRequired || HasDepartedStart || _retriedAbsoluteRequest
+            || elapsedMilliseconds < AbsoluteRetryDelayMilliseconds)
+        {
+            return false;
+        }
+
+        _retriedAbsoluteRequest = true;
+        return true;
+    }
 
     public bool Observe(double currentPercent)
     {
