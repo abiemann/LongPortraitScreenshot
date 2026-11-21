@@ -38,6 +38,7 @@ DisableProgramGroupPage=yes
 LicenseFile={#LicenseFile}
 OutputDir={#OutputDir}
 OutputBaseFilename=LongPortraitScreenshot-{#MyAppDisplayVersion}-win-x64-setup
+SetupIconFile=..\src\LongPortraitScreenshot\Assets\app-icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 ArchitecturesAllowed=x64compatible
@@ -57,7 +58,7 @@ VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#MyAppVersion}
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

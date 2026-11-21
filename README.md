@@ -8,6 +8,8 @@ A Windows desktop utility that selects a vertically scrollable UI Automation ele
 
 Download the per-user x64 Windows setup from [GitHub Releases](https://github.com/abiemann/LongPortraitScreenshot/releases). It installs without administrator access and preserves your settings when uninstalled. Because the installer is not code-signed, Windows may show a SmartScreen warning.
 
+Setup selects **Create a desktop shortcut** on a fresh install and remembers your choice on upgrades. You can change it during setup.
+
 ## Requirements
 
 - Windows 10 or Windows 11

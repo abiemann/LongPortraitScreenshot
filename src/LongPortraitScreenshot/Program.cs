@@ -10,6 +10,7 @@ internal static class Program
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new MainForm());
+        using Icon? appIcon = Icon.ExtractIcon(Application.ExecutablePath, 0);
+        Application.Run(new MainForm { Icon = appIcon });
     }
 }
