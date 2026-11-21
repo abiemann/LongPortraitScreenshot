@@ -12,8 +12,8 @@ Setup selects **Create a desktop shortcut** on a fresh install and remembers you
 
 ## Requirements
 
-- Windows 10 or Windows 11
-- Visual Studio 2026 with the .NET desktop development workload, or the .NET 10 SDK
+- To run the app, use an x64-compatible PC with Windows 10 or Windows 11. The installer includes the .NET runtime.
+- To build from source, use the .NET 10 SDK or Visual Studio 2026 with the .NET desktop development workload.
 
 ## Build
 
@@ -33,8 +33,8 @@ dotnet run --project .\tests\LongPortraitScreenshot.SelfTest\LongPortraitScreens
 
 1. Open the window containing the scrollable content and leave it unobscured.
 2. Drag the finder target over the scrollable pane. A green border identifies the selected container.
-3. Release the mouse. The utility scrolls the pane, captures it, restores its original position, and asks where to save the PNG.
-4. Press Escape during capture to cancel.
+3. Release the mouse to start capturing. Press Escape during capture to cancel.
+4. When capture finishes, the utility restores the original scroll position and opens a preview. Adjust the crop if needed, then choose **Clipboard Copy** or **Save As…**.
 
 The scrollbar-crop and horizontal-empty-space trim options are enabled by default and remembered for each Windows user. Horizontal trimming keeps a 5-pixel margin beside detected content.
 
@@ -44,7 +44,7 @@ If capture fails after collecting a usable portion, the app shows the reason and
 
 When a capture is estimated to exceed the normal 40,000,000-pixel safety limit, the app offers three choices: attempt the entire pane, capture the largest complete section from the top that fits within the limit, or cancel. The full-capture choice bypasses the app's pixel safety guards, but the runaway-scroll guard, Windows bitmap limits, and available memory still apply.
 
-The first release supports vertical UI Automation scroll containers. Elevated, protected, minimized, moving, dynamically changing, or non-UI-Automation controls may not be capturable.
+The app supports vertical UI Automation scroll containers. Elevated, protected, minimized, moving, dynamically changing, or non-UI-Automation controls may not be capturable.
 
 ## Project structure
 
