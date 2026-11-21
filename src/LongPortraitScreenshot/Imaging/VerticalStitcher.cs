@@ -4,6 +4,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
 using System.Threading;
+using LongPortraitScreenshot.Capture;
 
 namespace LongPortraitScreenshot.Imaging;
 
@@ -49,7 +50,8 @@ public static class VerticalStitcher
         long maxPixels,
         CancellationToken cancellationToken,
         int? finalFrameRowsToAppend,
-        IReadOnlyList<int>? measuredVerticalShifts)
+        IReadOnlyList<int>? measuredVerticalShifts,
+        IReadOnlyList<int>? measuredCompositionRows = null)
     {
         ArgumentNullException.ThrowIfNull(frames);
         cancellationToken.ThrowIfCancellationRequested();
@@ -71,6 +73,13 @@ public static class VerticalStitcher
             throw new ArgumentException(
                 "The retained vertical-shift count must be one less than the captured frame count.",
                 nameof(measuredVerticalShifts));
+        }
+
+        if (measuredCompositionRows is not null
+            && (measuredVerticalShifts is null || measuredCompositionRows.Count != measuredVerticalShifts.Count))
+        {
+            throw new ArgumentException("Retained seam rows must correspond to the retained shifts.",
+                nameof(measuredCompositionRows));
         }
 
         if (frames.Count == 1)
@@ -100,7 +109,7 @@ public static class VerticalStitcher
                     frames[index],
                     index,
                     cancellationToken)
-                : new VerticalAlignment(measuredVerticalShifts[index - 1], -1);
+                : new VerticalAlignment(measuredVerticalShifts[index - 1], measuredCompositionRows?[index - 1] ?? -1);
             int shift = alignment.Shift;
             int maximumMeasuredShift = height - Math.Max(24, height / 8);
             if (shift <= 0 || shift > maximumMeasuredShift)
@@ -108,6 +117,12 @@ public static class VerticalStitcher
                 throw new ArgumentOutOfRangeException(
                     nameof(measuredVerticalShifts),
                     $"Retained shift {index} is outside the supported overlap range.");
+            }
+
+            if (measuredCompositionRows is not null && (uint)alignment.CompositionSourceY >= (uint)(height - shift))
+            {
+                throw new ArgumentOutOfRangeException(nameof(measuredCompositionRows),
+                    "Retained seam row is outside the overlap.");
             }
 
             int appendRows = index == frames.Count - 1 && finalFrameRowsToAppend is int requestedRows
@@ -249,9 +264,9 @@ public static class VerticalStitcher
         CancellationToken cancellationToken) =>
         MeasureVerticalAlignment(previous, current, currentFrameIndex, cancellationToken).Shift;
 
-    private readonly record struct VerticalAlignment(int Shift, int CompositionSourceY);
+    internal readonly record struct VerticalAlignment(int Shift, int CompositionSourceY);
 
-    private static VerticalAlignment MeasureVerticalAlignment(
+    internal static VerticalAlignment MeasureVerticalAlignment(
         CapturedFrame previous,
         CapturedFrame current,
         int currentFrameIndex,
@@ -287,25 +302,23 @@ public static class VerticalStitcher
                 "the target reported invalid scroll information");
         }
 
-        double percentDelta = current.ScrollPercent - previous.ScrollPercent;
-        double viewSize = (previous.ViewSize + current.ViewSize) / 2.0;
+        if (previous.ViewSize is <= 0.0 or >= 100.0 || current.ViewSize is <= 0.0 or >= 100.0)
+        {
+            throw SeamFailure(
+                currentFrameIndex,
+                $"the target reported an invalid vertical view size ({previous.ViewSize:0.###}% to {current.ViewSize:0.###}%)");
+        }
 
-        if (percentDelta <= 0.0001)
+        // Lazy-loaded content can lower the reported percentage during a forward scroll.
+        double currentPercentOnPreviousRange = ScrollPositionPolicy.RebasePercent(
+            current.ScrollPercent, current.ViewSize, previous.ViewSize);
+        double percentDelta = currentPercentOnPreviousRange - previous.ScrollPercent;
+        if (!(percentDelta > 0.0001))
         {
             throw SeamFailure(
                 currentFrameIndex,
                 "the target did not report forward scroll movement");
         }
-
-        if (viewSize <= 0.0 || viewSize >= 100.0)
-        {
-            throw SeamFailure(
-                currentFrameIndex,
-                $"the target reported an invalid vertical view size ({viewSize:0.###}%)");
-        }
-
-        double scrollRangePixels = height * ((100.0 / viewSize) - 1.0);
-        int predictedShift = (int)Math.Round((percentDelta / 100.0) * scrollRangePixels);
 
         int minimumOverlap = Math.Max(24, height / 8);
         int maximumShift = height - minimumOverlap;
@@ -314,7 +327,8 @@ public static class VerticalStitcher
             throw SeamFailure(currentFrameIndex, "the captured viewport is too short to establish an overlap");
         }
 
-        predictedShift = Math.Clamp(predictedShift, 1, maximumShift);
+        double previousRangePixels = height * ((100.0 / previous.ViewSize) - 1.0);
+        int predictedShift = (int)Math.Clamp(Math.Round(percentDelta / 100.0 * previousRangePixels), 1, maximumShift);
         int searchRadius = Math.Max(18, (int)Math.Ceiling(height * 0.12));
         int minimumShift = Math.Max(1, predictedShift - searchRadius);
         int maximumSearchShift = Math.Min(maximumShift, predictedShift + searchRadius);
@@ -334,11 +348,11 @@ public static class VerticalStitcher
             firstX, exclusiveLastX, cancellationToken, out string? failure);
         if (failure is not null)
         {
-            shift = FindShiftOutsidePrediction(previousPixels, currentPixels, maximumShift, minimumShift,
-                maximumSearchShift, firstX, exclusiveLastX, cancellationToken);
+            shift = FindShiftAcrossFullOverlap(previousPixels, currentPixels, maximumShift,
+                firstX, exclusiveLastX, cancellationToken);
             if (shift < 1)
             {
-                throw SeamFailure(currentFrameIndex, failure);
+                throw new FrameAlignmentException(currentFrameIndex, failure);
             }
         }
 
@@ -484,17 +498,12 @@ public static class VerticalStitcher
         return bestShift;
     }
 
-    private static int FindShiftOutsidePrediction(
-        PixelBuffer previous, PixelBuffer current, int maximumShift, int expectedMinimum, int expectedMaximum,
+    private static int FindShiftAcrossFullOverlap(
+        PixelBuffer previous, PixelBuffer current, int maximumShift,
         int firstX, int exclusiveLastX, CancellationToken cancellationToken)
     {
-        if (expectedMinimum == 1 && expectedMaximum == maximumShift)
-        {
-            return -1;
-        }
-
-        // A provider can report a page scroll while the rendered content only moves a few rows.
-        // Search every supported shift, including the original range so repeated matches compete.
+        // Recheck each shift over its full overlap. A repainted area can dominate the
+        // shorter window shared by all predicted shifts even when the prediction was right.
         int height = current.Height;
         List<(int X, int Y)> moving = FindMovingSamplePoints(previous, current, height, firstX,
             exclusiveLastX, cancellationToken, out int gridSize, out _);
@@ -524,8 +533,8 @@ public static class VerticalStitcher
             }
         }
 
-        if (bestShift < 1 || (bestShift >= expectedMinimum && bestShift <= expectedMaximum)
-            || best > MaximumAcceptablePixelError || nextBest - best < Math.Max(1.0, best * 0.08))
+        if (bestShift < 1 || best > MaximumAcceptablePixelError
+            || nextBest - best < Math.Max(1.0, best * 0.08))
         {
             return -1;
         }
@@ -744,7 +753,7 @@ public static class VerticalStitcher
             }
         }
 
-        throw SeamFailure(
+        throw new FrameAlignmentException(
             currentFrameIndex,
             "there was no verified moving content at which to join the frames without repeating fixed content");
     }
@@ -802,12 +811,15 @@ public static class VerticalStitcher
                 Math.Abs(first.Pixels[firstOffset + 1] - second.Pixels[secondOffset + 1]),
                 Math.Abs(first.Pixels[firstOffset + 2] - second.Pixels[secondOffset + 2])));
 
-    private static InvalidOperationException SeamFailure(int currentFrameIndex, string reason)
-    {
-        return new InvalidOperationException(
-            $"Could not confidently stitch frames {currentFrameIndex} and {currentFrameIndex + 1}: {reason}. " +
-            "Keep the target unobscured and stationary, disable animations if possible, and retry.");
-    }
+    internal sealed class FrameAlignmentException(int frameIndex, string reason)
+        : InvalidOperationException(FormatSeamFailure(frameIndex, reason));
+
+    private static InvalidOperationException SeamFailure(int currentFrameIndex, string reason) =>
+        new(FormatSeamFailure(currentFrameIndex, reason));
+
+    private static string FormatSeamFailure(int frameIndex, string reason) =>
+        $"Could not confidently stitch frames {frameIndex} and {frameIndex + 1}: {reason}. " +
+        "Keep the target unobscured and stationary, disable animations if possible, and retry.";
 
     private static void EnsureOutputFits(int width, long height, long maxPixels)
     {

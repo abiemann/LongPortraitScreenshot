@@ -51,6 +51,8 @@ internal static class Program
             ScrollSettleAllowsAlreadySatisfiedRequest();
             StaleAbsoluteScrollCanBeRepeatedOnce();
 
+            FrameCaptureRecoversOnlyVerifiedOverlaps();
+            FrameCaptureHonorsCancellationDuringRecovery();
             ImagingRegressionTests.Run();
             UiSaveRegressionTests.Run();
             ScrollPositionRegressionTests.Run();
@@ -63,6 +65,92 @@ internal static class Program
             Console.Error.WriteLine("LongPortraitScreenshot self-test failed:");
             Console.Error.WriteLine(exception);
             return 1;
+        }
+    }
+
+    private static void FrameCaptureRecoversOnlyVerifiedOverlaps()
+    {
+        const int width = 117, height = 240;
+        using Bitmap page = CreateDeterministicBitmap(width, height * 2);
+        using Bitmap first = page.Clone(new Rectangle(0, 0, width, height), page.PixelFormat);
+        CapturedFrame previous = new(first, 0, 50);
+
+        // Accept the initial capture, the settled repaint, the shorter step, or none of them.
+        foreach (int validAttempt in new[] { 0, 1, 2, -1 })
+        {
+            int attempts = 0;
+            int offset = 160;
+            List<CaptureSession.FrameRetry> retries = [];
+
+            CapturedFrame Grab()
+            {
+                Bitmap bitmap = page.Clone(new Rectangle(0, offset, width, height), page.PixelFormat);
+                if (attempts++ != validAttempt)
+                {
+                    using Graphics graphics = Graphics.FromImage(bitmap);
+                    graphics.Clear(Color.Magenta);
+                }
+                return new CapturedFrame(bitmap, offset * 100.0 / height, 50);
+            }
+
+            bool Prepare(CaptureSession.FrameRetry retry)
+            {
+                retries.Add(retry);
+                if (retry == CaptureSession.FrameRetry.ShorterStep) offset /= 2;
+                return true;
+            }
+
+            try
+            {
+                var (accepted, measured) = CaptureSession.CaptureAlignedFrame(previous, 14, Grab, Prepare, default);
+                using Bitmap frame = accepted.Image;
+                Require(validAttempt >= 0 && measured?.Shift == offset, "Recovery returned an unverified seam.");
+                using Bitmap actual = VerticalStitcher.Stitch([previous, accepted], MaximumOutputPixels,
+                    default, null, [measured!.Value.Shift], [measured.Value.CompositionSourceY]);
+                using Bitmap expected = page.Clone(new Rectangle(0, 0, width, height + offset), page.PixelFormat);
+                AssertBitmapsEqual(expected, actual, "capture recovery retained every row");
+            }
+            catch (VerticalStitcher.FrameAlignmentException) when (validAttempt < 0)
+            {
+            }
+
+            int expectedRetries = validAttempt < 0 ? 2 : validAttempt;
+            Require(attempts == expectedRetries + 1 && retries.Count == expectedRetries,
+                "Unexpected number of attempts to recover the seam.");
+            Require(retries.Count == 0 || retries[0] == CaptureSession.FrameRetry.Repaint,
+                "The first retry must wait for the current viewport.");
+            Require(retries.Count < 2 || retries[1] == CaptureSession.FrameRetry.ShorterStep,
+                "The final retry must request more overlap.");
+        }
+    }
+
+    private static void FrameCaptureHonorsCancellationDuringRecovery()
+    {
+        using Bitmap first = CreateDeterministicBitmap(100, 240);
+        using CancellationTokenSource cancellation = new();
+        int acquisitions = 0;
+        CapturedFrame Grab()
+        {
+            acquisitions++;
+            return new CapturedFrame(new Bitmap(first.Width, first.Height), 50, 50);
+        }
+
+        bool Prepare(CaptureSession.FrameRetry retry)
+        {
+            cancellation.Cancel();
+            return true;
+        }
+
+        try
+        {
+            var (unexpected, _) = CaptureSession.CaptureAlignedFrame(
+                new CapturedFrame(first, 0, 50), 14, Grab, Prepare, cancellation.Token);
+            unexpected.Image.Dispose();
+            throw new InvalidOperationException("Accepted a frame despite cancellation during recovery.");
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            Require(acquisitions == 1, "A retry captured again after cancellation.");
         }
     }
 

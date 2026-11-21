@@ -11,6 +11,9 @@ internal static class ScrollPositionRegressionTests
         SmallIncrementalRequestsMoveInBothDirections();
         EndpointRequestsReachTheActualTopAndBottom();
         SmallFinalMovementStillCountsAsProgress();
+        EdgePageGrowthPreservesMeasuredScrollProgress();
+        ExtentChangesWithoutMotionDoNotSettleOrAdvance();
+        RebasedComparisonsPreserveOffsetsBeyondAnOldBottom();
     }
 
     private static void CaptureIncludesFinalRowsAtAlmostOneHundredPercent()
@@ -138,6 +141,61 @@ internal static class ScrollPositionRegressionTests
             "The last step must count even when it is below the usual movement threshold.");
         Require(!ScrollPositionPolicy.HasDirectionalProgress(startPercent, startPercent, 100.0),
             "No movement must never satisfy a pending endpoint request.");
+    }
+
+    private static void EdgePageGrowthPreservesMeasuredScrollProgress()
+    {
+        // Edge grew the page during this 1,485-pixel viewport capture.
+        const double start = 96.281374, initialView = 5.203588, reported = 92.23205, grownView = 4.82582;
+        double requested = start + ScrollPositionPolicy.CalculateScrollPercentStep(initialView);
+        double actual = ScrollPositionPolicy.RebasePercent(reported, grownView, initialView);
+        double deltaPixels = (actual - start) * 1485 * (100 / initialView - 1) / 100;
+
+        Require(Math.Abs(deltaPixels - 965) < 0.1, "Edge's lower percentage must account for 965px of forward movement.");
+        Require(ScrollPositionPolicy.HasDirectionalProgress(start, actual, requested)
+                && ScrollPositionPolicy.HasReachedRequestedPercent(start, actual, requested),
+            "Growing the scroll range must not trigger another relative scroll after reaching the request.");
+
+        ScrollSettleTracker tracker = new(start, requested, actual, 0.0001);
+        Require(!tracker.TryBeginAbsoluteRetry(350) && !tracker.Observe(actual)
+                && tracker.Observe(actual) && tracker.ConfirmAfterRender(actual),
+            "Edge's move should settle without issuing another absolute scroll.");
+        double restore = ScrollPositionPolicy.RebasePercent(start, initialView, grownView);
+        Require(Math.Abs(restore - 88.937159) < 0.00001,
+            "Restoring the original pixel offset must target its position in the new extent.");
+    }
+
+    private static void ExtentChangesWithoutMotionDoNotSettleOrAdvance()
+    {
+        const double start = 50, request = 60, initialView = 20, grownView = 10;
+        double still = ScrollPositionPolicy.RebasePercent(start, initialView, grownView);
+        double actual = ScrollPositionPolicy.RebasePercent(still, grownView, initialView);
+        ScrollSettleTracker tracker = new(start, request, start, 0.0001);
+        Require(!tracker.Observe(actual) && !tracker.HasDepartedStart && tracker.TryBeginAbsoluteRetry(350),
+            "A percentage reduced by page growth alone must not look like pixel movement.");
+        Require(!ScrollPositionPolicy.HasDirectionalProgress(start, actual, request),
+            "An unchanged pixel offset must not count as an accepted capture step.");
+        double retry = ScrollPositionPolicy.RebasePercent(request, initialView, grownView);
+        Require(Math.Abs(retry - 26.6666666667) < 1e-8,
+            "The retry must request the original physical destination in the latest scroll range.");
+        double sameReading = ScrollPositionPolicy.RebasePercent(start, grownView, initialView);
+        Require(ScrollPositionPolicy.HasDirectionalProgress(start, sameReading, request),
+            "The same reported percentage can be forward movement after the document grows.");
+    }
+
+    private static void RebasedComparisonsPreserveOffsetsBeyondAnOldBottom()
+    {
+        double oldPercent = ScrollPositionPolicy.RebasePercent(80, 10, 20);
+        Require(oldPercent == 180 && ScrollPositionPolicy.RebasePercent(oldPercent, 20, 10) == 80,
+            "A comparison must preserve positions past the original scrollable extent.");
+        foreach (double invalidView in new[] { 0, 100, -1, double.NaN, double.PositiveInfinity })
+        {
+            Require(ScrollPositionPolicy.RebasePercent(40, invalidView, 5) == 40
+                    && ScrollPositionPolicy.RebasePercent(40, 5, invalidView) == 40,
+                "Unavailable scroll extents must preserve the original reading.");
+        }
+        Require(ScrollPositionPolicy.RebasePercent(-1, 5, 10) == -1,
+            "The UI Automation NoScroll sentinel must be preserved.");
     }
 
     private static void Require(bool condition, string message)

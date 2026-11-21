@@ -20,6 +20,7 @@ internal static class CaptureSession
     private const int ScrollSettleTimeoutMilliseconds = 2_000;
     private const int ScrollPollMilliseconds = 50;
     private const int RenderDelayMilliseconds = 100;
+    private const int BottomConfirmationMilliseconds = 500;
     private const int MaximumIncrementalScrollAttempts = 256;
     private const int MaximumIncrementalScrollDurationMilliseconds = 20_000;
 
@@ -123,20 +124,63 @@ internal static class CaptureSession
 
             List<CapturedFrame> frames = [];
             List<int> measuredVerticalShifts = [];
+            List<int> measuredCompositionRows = [];
             long rawFramePixels = 0;
             long measuredStitchedHeight = captureBounds.Height;
             bool isPartial = false;
             int? finalFrameRowsToAppend = null;
             Bitmap? stitched = null;
 
+            Func<CapturedFrame> grabFrame = () =>
+            {
+                EnsureBoundsStable(captureBounds, ReadVisibleBounds(target.Element));
+                Bitmap image = ScreenGrabber.Capture(captureBounds);
+                try
+                {
+                    EnsureBoundsStable(captureBounds, ReadVisibleBounds(target.Element));
+                    return new CapturedFrame(image, currentScroll.VerticalScrollPercent, currentScroll.VerticalViewSize);
+                }
+                catch
+                {
+                    image.Dispose();
+                    throw;
+                }
+            };
+
+            Func<FrameRetry, bool> prepareRetry = retry =>
+            {
+                CapturedFrame previousFrame = frames[^1];
+                double previous = previousFrame.ScrollPercent;
+                double referenceViewSize = previousFrame.ViewSize;
+                if (retry == FrameRetry.Repaint)
+                {
+                    // UI Automation can settle before Edge presents the new page pixels.
+                    cancellationToken.WaitHandle.WaitOne(2 * RenderDelayMilliseconds);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    currentScroll = ReadScrollState(target.ScrollPattern);
+                    return currentScroll.PercentAtViewSize(referenceViewSize) > previous + MinimumMovementPercent;
+                }
+
+                // Larger overlap gives the matcher more stable content to verify.
+                double rejected = currentScroll.PercentAtViewSize(referenceViewSize);
+                double midpoint = previous + (rejected - previous) / 2;
+                if (midpoint <= previous + MinimumMovementPercent)
+                {
+                    return false;
+                }
+                double request = ScrollPositionPolicy.RebasePercent(midpoint, referenceViewSize, currentScroll.VerticalViewSize);
+                currentScroll = MoveToScrollPercent(target.ScrollPattern, currentScroll,
+                    currentScroll.HorizontalScrollPercent, request, requireRequestedPosition: false,
+                    ref useIncrementalScrolling, cancellationToken, checkEscape: true);
+                double actual = currentScroll.PercentAtViewSize(referenceViewSize);
+                return actual > previous + MinimumMovementPercent && actual < rejected - MinimumMovementPercent;
+            };
+
             try
             {
                 while (true)
                 {
                     ThrowIfCancelled(cancellationToken);
-
-                    Rectangle beforeCaptureBounds = ReadVisibleBounds(target.Element);
-                    EnsureBoundsStable(captureBounds, beforeCaptureBounds);
 
                     if (frames.Count >= MaximumFrames)
                     {
@@ -177,27 +221,13 @@ internal static class CaptureSession
                         rawFramePixels = prospectiveRawPixels;
                     }
 
-                    Bitmap image = ScreenGrabber.Capture(captureBounds);
+                    (CapturedFrame capturedFrame, VerticalStitcher.VerticalAlignment? alignment) = CaptureAlignedFrame(
+                        frames.Count == 0 ? null : frames[^1], frames.Count, grabFrame, prepareRetry, cancellationToken);
                     try
                     {
-                        Rectangle afterCaptureBounds = ReadVisibleBounds(target.Element);
-                        EnsureBoundsStable(captureBounds, afterCaptureBounds);
-                        CapturedFrame capturedFrame = new(
-                            image,
-                            currentScroll.VerticalScrollPercent,
-                            currentScroll.VerticalViewSize);
-
                         bool stopAfterFrame = false;
-                        int? retainedShift = null;
-                        if (options.Mode != CaptureMode.Full && frames.Count > 0)
+                        if (alignment is { Shift: var addedRows })
                         {
-                            int addedRows = VerticalStitcher.MeasureVerticalShift(
-                                frames[^1],
-                                capturedFrame,
-                                frames.Count,
-                                cancellationToken);
-                            retainedShift = addedRows;
-
                             if (options.Mode == CaptureMode.Standard)
                             {
                                 long candidateHeight = checked(measuredStitchedHeight + addedRows);
@@ -207,7 +237,7 @@ internal static class CaptureSession
                                 CaptureSizePolicy.EnsureStandardActualFits(candidatePixels);
                                 measuredStitchedHeight = candidateHeight;
                             }
-                            else
+                            else if (options.Mode == CaptureMode.SafePortion)
                             {
                                 int acceptedRows = CaptureSizePolicy.GetSafeRowsToAppend(
                                     captureBounds.Width,
@@ -217,7 +247,7 @@ internal static class CaptureSession
                                     out _);
                                 if (acceptedRows == 0)
                                 {
-                                    image.Dispose();
+                                    capturedFrame.Image.Dispose();
                                     isPartial = true;
                                     break;
                                 }
@@ -233,9 +263,10 @@ internal static class CaptureSession
                         }
 
                         frames.Add(capturedFrame);
-                        if (retainedShift is int shift)
+                        if (alignment is { } measured)
                         {
-                            measuredVerticalShifts.Add(shift);
+                            measuredVerticalShifts.Add(measured.Shift);
+                            measuredCompositionRows.Add(measured.CompositionSourceY);
                         }
 
                         if (stopAfterFrame)
@@ -245,29 +276,55 @@ internal static class CaptureSession
                     }
                     catch
                     {
-                        image.Dispose();
+                        capturedFrame.Image.Dispose();
                         throw;
                     }
 
-                    if (ScrollPositionPolicy.IsAtBottom(currentScroll.VerticalScrollPercent))
+                    bool capturedAtBottom = ScrollPositionPolicy.IsAtBottom(currentScroll.VerticalScrollPercent);
+                    if (capturedAtBottom)
+                    {
+                        // Reaching the bottom can trigger an asynchronous append.
+                        cancellationToken.WaitHandle.WaitOne(BottomConfirmationMilliseconds);
+                        cancellationToken.ThrowIfCancellationRequested();
+                    }
+
+                    // Matching a frame can take long enough for the document to grow again.
+                    // Request the next step relative to the last captured pixels in the latest range.
+                    ScrollState beforeMove = ReadScrollState(target.ScrollPattern);
+                    if (capturedAtBottom && ScrollPositionPolicy.IsAtBottom(beforeMove.VerticalScrollPercent)
+                        && Math.Round(captureBounds.Height * 100.0 / beforeMove.VerticalViewSize)
+                            <= Math.Round(captureBounds.Height * 100.0 / currentScroll.VerticalViewSize))
                     {
                         break;
                     }
 
-                    double step = ScrollPositionPolicy.CalculateScrollPercentStep(currentScroll.VerticalViewSize);
-                    double requestedPercent = Math.Min(100.0, currentScroll.VerticalScrollPercent + step);
+                    if (options.Mode == CaptureMode.SafePortion
+                        && measuredStitchedHeight >= CaptureSizePolicy.SafePixelLimit / captureBounds.Width)
+                    {
+                        isPartial = true;
+                        break;
+                    }
+
+                    if (options.Mode == CaptureMode.Standard && beforeMove.VerticalViewSize < frames[0].ViewSize)
+                    {
+                        CaptureSizePolicy.EnsureStandardEstimateFits(EstimateOutputPixels(captureBounds, beforeMove.VerticalViewSize));
+                    }
+
+                    double capturedPercent = currentScroll.PercentAtViewSize(beforeMove.VerticalViewSize);
+                    double step = ScrollPositionPolicy.CalculateScrollPercentStep(beforeMove.VerticalViewSize);
+                    double requestedPercent = Math.Min(100.0, capturedPercent + step);
                     ScrollState nextScroll = MoveToScrollPercent(
                         target.ScrollPattern,
-                        currentScroll,
-                        currentScroll.HorizontalScrollPercent,
+                        beforeMove,
+                        beforeMove.HorizontalScrollPercent,
                         requestedPercent,
                         requireRequestedPosition: false,
                         ref useIncrementalScrolling,
                         cancellationToken,
                         checkEscape: true);
                     if (!ScrollPositionPolicy.HasDirectionalProgress(
-                        currentScroll.VerticalScrollPercent,
-                        nextScroll.VerticalScrollPercent,
+                        capturedPercent,
+                        nextScroll.PercentAtViewSize(beforeMove.VerticalViewSize),
                         requestedPercent))
                     {
                         throw new InvalidOperationException(
@@ -288,7 +345,8 @@ internal static class CaptureSession
                         : CaptureSizePolicy.SafePixelLimit,
                     processingToken,
                     finalFrameRowsToAppend,
-                    options.Mode == CaptureMode.Full ? null : measuredVerticalShifts);
+                    measuredVerticalShifts,
+                    measuredCompositionRows);
                 int frameCount = frames.Count;
                 // Composition owns an independent bitmap; release the viewports before
                 // either crop pass allocates another output-sized image.
@@ -341,13 +399,14 @@ internal static class CaptureSession
                 try
                 {
                     ScrollState restoreStart = ReadScrollState(target.ScrollPattern);
+                    bool restoreIncrementally = false;
                     _ = MoveToScrollPercent(
                         target.ScrollPattern,
                         restoreStart,
                         originalScroll.HorizontalScrollPercent,
-                        originalScroll.VerticalScrollPercent,
+                        originalScroll.PercentAtViewSize(restoreStart.VerticalViewSize),
                         requireRequestedPosition: true,
-                        ref useIncrementalScrolling,
+                        ref restoreIncrementally,
                         CancellationToken.None,
                         checkEscape: false);
                 }
@@ -368,9 +427,50 @@ internal static class CaptureSession
         }
     }
 
+    internal enum FrameRetry
+    {
+        Repaint,
+        ShorterStep
+    }
+
+    internal static (CapturedFrame Frame, VerticalStitcher.VerticalAlignment? Alignment) CaptureAlignedFrame(
+        CapturedFrame? previous, int frameIndex, Func<CapturedFrame> grabFrame,
+        Func<FrameRetry, bool> prepareRetry, CancellationToken cancellationToken)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CapturedFrame frame = grabFrame();
+            if (previous is null)
+            {
+                return (frame, null);
+            }
+
+            try
+            {
+                return (frame, VerticalStitcher.MeasureVerticalAlignment(previous, frame, frameIndex, cancellationToken));
+            }
+            catch (VerticalStitcher.FrameAlignmentException) when (attempt < 2)
+            {
+                frame.Image.Dispose();
+                cancellationToken.ThrowIfCancellationRequested();
+                FrameRetry retry = attempt == 0 ? FrameRetry.Repaint : FrameRetry.ShorterStep;
+                if (!prepareRetry(retry))
+                {
+                    throw;
+                }
+            }
+            catch
+            {
+                frame.Image.Dispose();
+                throw;
+            }
+        }
+    }
+
     private static ScrollState WaitForScrollToSettle(
         ScrollPattern scrollPattern,
-        double startPercent,
+        ScrollState start,
         double requestedPercent,
         CancellationToken cancellationToken,
         bool checkEscape,
@@ -379,9 +479,9 @@ internal static class CaptureSession
         Stopwatch stopwatch = Stopwatch.StartNew();
         ScrollState previous = ReadScrollState(scrollPattern);
         ScrollSettleTracker tracker = new(
-            startPercent,
+            start.VerticalScrollPercent,
             requestedPercent,
-            previous.VerticalScrollPercent,
+            previous.PercentAtViewSize(start.VerticalViewSize),
             MinimumMovementPercent);
         long? movementStartedAtMilliseconds = tracker.HasDepartedStart ? 0 : null;
 
@@ -392,7 +492,7 @@ internal static class CaptureSession
             ScrollState current = ReadScrollState(scrollPattern);
 
             bool wasWaitingForMovement = !tracker.HasDepartedStart;
-            bool readyForRenderCheck = tracker.Observe(current.VerticalScrollPercent);
+            bool readyForRenderCheck = tracker.Observe(current.PercentAtViewSize(start.VerticalViewSize));
             if (wasWaitingForMovement && tracker.HasDepartedStart)
             {
                 movementStartedAtMilliseconds = stopwatch.ElapsedMilliseconds;
@@ -407,7 +507,9 @@ internal static class CaptureSession
                 ThrowIfCancelled(cancellationToken, checkEscape);
                 try
                 {
-                    SetScrollPercent(scrollPattern, horizontal, requestedPercent);
+                    double retryPercent = ScrollPositionPolicy.RebasePercent(
+                        requestedPercent, start.VerticalViewSize, current.VerticalViewSize);
+                    SetScrollPercent(scrollPattern, horizontal, retryPercent);
                 }
                 catch (InvalidOperationException)
                 {
@@ -422,7 +524,7 @@ internal static class CaptureSession
                 ThrowIfCancelled(cancellationToken, checkEscape);
                 ScrollState afterRender = ReadScrollState(scrollPattern);
                 previous = afterRender;
-                if (tracker.ConfirmAfterRender(afterRender.VerticalScrollPercent))
+                if (tracker.ConfirmAfterRender(afterRender.PercentAtViewSize(start.VerticalViewSize)))
                 {
                     return afterRender;
                 }
@@ -430,7 +532,7 @@ internal static class CaptureSession
         }
 
         if (!tracker.HasDepartedStart
-            && Math.Abs(requestedPercent - startPercent) > MinimumMovementPercent)
+            && Math.Abs(requestedPercent - start.VerticalScrollPercent) > MinimumMovementPercent)
         {
             return previous;
         }
@@ -475,17 +577,18 @@ internal static class CaptureSession
             {
                 ScrollState settled = WaitForScrollToSettle(
                     scrollPattern,
-                    start.VerticalScrollPercent,
+                    start,
                     requestedVerticalPercent,
                     cancellationToken,
                     checkEscape,
                     requestedHorizontalPercent);
 
+                double actual = settled.PercentAtViewSize(start.VerticalViewSize);
                 bool requestSatisfied = requireRequestedPosition
-                    ? ScrollPositionPolicy.IsRequestedPositionReached(settled.VerticalScrollPercent, requestedVerticalPercent)
+                    ? ScrollPositionPolicy.IsRequestedPositionReached(actual, requestedVerticalPercent)
                     : ScrollPositionPolicy.HasDirectionalProgress(
                         start.VerticalScrollPercent,
-                        settled.VerticalScrollPercent,
+                        actual,
                         requestedVerticalPercent);
                 if (requestSatisfied)
                 {
@@ -500,7 +603,7 @@ internal static class CaptureSession
         return ScrollIncrementallyToPercent(
             scrollPattern,
             fallbackStart,
-            requestedVerticalPercent,
+            ScrollPositionPolicy.RebasePercent(requestedVerticalPercent, start.VerticalViewSize, fallbackStart.VerticalViewSize),
             requireRequestedPosition,
             cancellationToken,
             checkEscape);
@@ -534,7 +637,7 @@ internal static class CaptureSession
         {
             if (ScrollPositionPolicy.HasReachedRequestedPercent(
                 start.VerticalScrollPercent,
-                current.VerticalScrollPercent,
+                current.PercentAtViewSize(start.VerticalViewSize),
                 requestedVerticalPercent))
             {
                 return current;
@@ -554,17 +657,17 @@ internal static class CaptureSession
 
             ScrollState next = WaitForScrollToSettle(
                 scrollPattern,
-                current.VerticalScrollPercent,
-                requestedVerticalPercent,
+                current,
+                ScrollPositionPolicy.RebasePercent(requestedVerticalPercent, start.VerticalViewSize, current.VerticalViewSize),
                 cancellationToken,
                 checkEscape);
 
             if (!ScrollPositionPolicy.HasDirectionalProgress(
-                current.VerticalScrollPercent,
-                next.VerticalScrollPercent,
+                current.PercentAtViewSize(start.VerticalViewSize),
+                next.PercentAtViewSize(start.VerticalViewSize),
                 requestedVerticalPercent))
             {
-                return current;
+                return next;
             }
 
             current = next;
@@ -617,7 +720,7 @@ internal static class CaptureSession
     {
         try
         {
-            scrollPattern.SetScrollPercent(horizontalScrollPercent, verticalScrollPercent);
+            scrollPattern.SetScrollPercent(horizontalScrollPercent, Math.Clamp(verticalScrollPercent, 0.0, 100.0));
         }
         catch (Exception exception) when (exception is ElementNotAvailableException or InvalidOperationException or COMException)
         {
@@ -824,5 +927,9 @@ internal static class CaptureSession
         bool VerticallyScrollable,
         double HorizontalScrollPercent,
         double VerticalScrollPercent,
-        double VerticalViewSize);
+        double VerticalViewSize)
+    {
+        public double PercentAtViewSize(double referenceViewSize) =>
+            ScrollPositionPolicy.RebasePercent(VerticalScrollPercent, VerticalViewSize, referenceViewSize);
+    }
 }

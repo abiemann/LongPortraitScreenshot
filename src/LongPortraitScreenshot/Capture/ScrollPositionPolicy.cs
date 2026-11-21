@@ -12,6 +12,20 @@ internal static class ScrollPositionPolicy
     public static bool IsEndpoint(double requestedPercent) =>
         requestedPercent <= EndpointTolerancePercent || IsAtBottom(requestedPercent);
 
+    // UI Automation reports the offset as a fraction of the scrollable range.
+    // Keep the same physical offset when a lazy-loaded document changes that range.
+    public static double RebasePercent(double percent, double fromViewSize, double toViewSize)
+    {
+        if (fromViewSize == toViewSize || percent <= 0 || !double.IsFinite(percent)
+            || !(fromViewSize > 0 && fromViewSize < 100) || !(toViewSize > 0 && toViewSize < 100))
+        {
+            return percent;
+        }
+
+        double rangeRatio = (toViewSize / fromViewSize) * ((100 - fromViewSize) / (100 - toViewSize));
+        return percent * rangeRatio;
+    }
+
     public static double CalculateScrollPercentStep(double viewSize)
     {
         if (viewSize <= 0.0 || viewSize >= 100.0 || !double.IsFinite(viewSize))

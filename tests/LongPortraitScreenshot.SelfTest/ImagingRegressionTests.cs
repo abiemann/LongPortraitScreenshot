@@ -21,9 +21,12 @@ internal static class ImagingRegressionTests
         FixedChromeWithoutSharedContentIsRejected();
         MeasurementCancellationLeavesSourcesUsable();
         BrowserScrollMetadataCanDisagreeWithOnlyOneFrame();
+        GrowingPageCanAdvanceWhileItsScrollPercentFalls();
+        RepaintedRowsCanHideAnAccuratelyPredictedShift();
         ActualScrollCanExceedThePredictedSearchWindow();
         TwoEquallyGoodDistantOffsetsAreRejected();
         MatchingOnlyTheTopOfThePageIsRejected();
+        MatchingOnlyHalfThePredictedOverlapIsRejected();
         MovingSidebarOnStationaryContentIsRejected();
     }
 
@@ -48,6 +51,38 @@ internal static class ImagingRegressionTests
             new CapturedFrame(second, 8.9055, viewSize),
             new CapturedFrame(third, 17.811, viewSize)]);
         AssertEqual(page, result, "unequal pixel shifts for equal reported scroll steps");
+    }
+
+    private static void GrowingPageCanAdvanceWhileItsScrollPercentFalls()
+    {
+        const int width = 97, height = 1485, shift = 965;
+        using Bitmap page = CreateTexturedPage(width, height + shift);
+        using Bitmap first = page.Clone(new Rectangle(0, 0, width, height), page.PixelFormat);
+        using Bitmap second = page.Clone(new Rectangle(0, shift, width, height), page.PixelFormat);
+        // Edge loaded more content as the viewport advanced near the old end of the page.
+        using Bitmap result = VerticalStitcher.Stitch([
+            new CapturedFrame(first, 96.281374, 5.203588),
+            new CapturedFrame(second, 92.23205, 4.82582)]);
+        AssertEqual(page, result, "forward scroll across a growing page boundary");
+    }
+
+    private static void RepaintedRowsCanHideAnAccuratelyPredictedShift()
+    {
+        const int width = 113, height = 600, shift = 390;
+        using Bitmap page = CreateTexturedPage(width, height + shift);
+        using Bitmap first = page.Clone(new Rectangle(0, 0, width, height), page.PixelFormat);
+        using Bitmap second = page.Clone(new Rectangle(0, shift, width, height), page.PixelFormat);
+        using Bitmap repaint = CreateTexturedPage(width, 58, seed: 835);
+        using (Graphics graphics = Graphics.FromImage(second))
+        {
+            graphics.DrawImageUnscaled(repaint, 0, 0);
+        }
+
+        // The changed strip dominates the narrow scoring window, but 152 rows still match.
+        double viewSize = height * 100.0 / page.Height;
+        using Bitmap result = VerticalStitcher.Stitch([
+            new CapturedFrame(first, 0, viewSize), new CapturedFrame(second, 100, viewSize)]);
+        AssertEqual(page, result, "accurate scroll offset obscured by repainted rows");
     }
 
     private static void ActualScrollCanExceedThePredictedSearchWindow()
@@ -100,6 +135,22 @@ internal static class ImagingRegressionTests
         AssertSeamRejected(first, second, 65, "Matching a top panel alone must not certify a whole-page shift.");
     }
 
+    private static void MatchingOnlyHalfThePredictedOverlapIsRejected()
+    {
+        const int width = 113, height = 600, shift = 390;
+        using Bitmap first = CreateTexturedPage(width, height, channelRange: 128);
+        using Bitmap second = CreateTexturedPage(width, height, seed: 835, channelRange: 128);
+        using (Graphics graphics = Graphics.FromImage(second))
+        {
+            // Only the lower 110 of the 210 overlapping rows match. The unrelated rows
+            // have low enough contrast for the whole-overlap average to pass.
+            graphics.DrawImage(first, new Rectangle(0, 100, width, 110),
+                new Rectangle(0, shift + 100, width, 110), GraphicsUnit.Pixel);
+        }
+
+        AssertSeamRejected(first, second, 65, "A matching panel cannot verify the predicted shift on its own.");
+    }
+
     private static void MovingSidebarOnStationaryContentIsRejected()
     {
         const int width = 171, height = 600, shift = 35, sidebar = 30;
@@ -135,7 +186,7 @@ internal static class ImagingRegressionTests
         throw new InvalidOperationException(message);
     }
 
-    private static Bitmap CreateTexturedPage(int width, int height, int seed = 596)
+    private static Bitmap CreateTexturedPage(int width, int height, int seed = 596, int channelRange = 256)
     {
         Random random = new(seed);
         Bitmap bitmap = new(width, height, PixelFormat.Format32bppArgb);
@@ -143,7 +194,8 @@ internal static class ImagingRegressionTests
         {
             for (int x = 0; x < width; x++)
             {
-                bitmap.SetPixel(x, y, Color.FromArgb(random.Next(256), random.Next(256), random.Next(256)));
+                bitmap.SetPixel(x, y, Color.FromArgb(
+                    random.Next(channelRange), random.Next(channelRange), random.Next(channelRange)));
             }
         }
 
