@@ -40,6 +40,8 @@ The scrollbar-crop and horizontal-empty-space trim options are enabled by defaul
 
 On pages that load more content while scrolling, capture uses the updated page height to find the next viewport. It verifies that adjacent images overlap and briefly rechecks the bottom for newly loaded content. The selected capture mode's size limits still apply.
 
+If capture fails after collecting a usable portion, the app shows the reason and asks whether to review the partial screenshot. Choose **Yes** to preview, crop, copy, or save it. Choose **No** to discard it and stop. Pressing Escape during capture still cancels immediately.
+
 When a capture is estimated to exceed the normal 40,000,000-pixel safety limit, the app offers three choices: attempt the entire pane, capture the largest complete section from the top that fits within the limit, or cancel. The full-capture choice bypasses the app's pixel safety guards, but the runaway-scroll guard, Windows bitmap limits, and available memory still apply.
 
 The first release supports vertical UI Automation scroll containers. Elevated, protected, minimized, moving, dynamically changing, or non-UI-Automation controls may not be capturable.

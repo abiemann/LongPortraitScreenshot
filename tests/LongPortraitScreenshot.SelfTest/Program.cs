@@ -33,6 +33,8 @@ internal static class Program
             FullModeBypassesApplicationPixelLimits();
             StitchHonorsCancellationToken();
             CaptureResultReportsPartialState();
+            FailedCaptureRetainsVerifiedPixels();
+            FailedTrimRetainsTheUsableBitmap();
             CropSelectionMovesEachEdgeAndUpdatesMemory();
             CropSelectionClampsAndPreventsEmptyOutput();
             CropSelectionResetRestoresFullImage();
@@ -822,6 +824,69 @@ internal static class Program
 
         Require(!complete.IsPartial, "The compatible three-argument result constructor must default to complete.");
         Require(partial.IsPartial, "A SafePortion result did not retain its partial marker.");
+        Require(complete.FailureReason is null && partial.FailureReason is null,
+            "Completed captures and planned safe portions must open without a failure prompt.");
+    }
+
+    private static void FailedCaptureRetainsVerifiedPixels()
+    {
+        const int width = 64, height = 96, shift = 32;
+        using Bitmap page = CreateDeterministicBitmap(width, height + 2 * shift);
+        foreach (bool compositionFails in new[] { false, true })
+        {
+            using CaptureFrameBuffer frames = new(3);
+            for (int i = 0; i < 3; i++)
+            {
+                Bitmap image = page.Clone(new Rectangle(0, i * shift, width, height), page.PixelFormat);
+                // A failed final join must leave the earlier verified frames available.
+                int seamRow = compositionFails && i == 2 ? height : 0;
+                frames.Add(new CapturedFrame(image, i * 50, 60),
+                    i == 0 ? null : new VerticalStitcher.VerticalAlignment(shift, seamRow));
+            }
+
+            string? cause = compositionFails ? null : "The target stopped scrolling.";
+            using CaptureResult result = frames.Finish(new CaptureOptions(false, false), Rectangle.Empty,
+                "Target", finalRows: null, isPartial: false, failureReason: cause, CancellationToken.None);
+            int expectedFrames = compositionFails ? 2 : 3;
+            using Bitmap expected = page.Clone(new Rectangle(0, 0, width, height + (expectedFrames - 1) * shift),
+                page.PixelFormat);
+            Require(result.IsPartial && result.FrameCount == expectedFrames && result.FailureReason is not null,
+                "Recovery must report the available frame count and explain why the image is partial.");
+            Require(cause is null || result.FailureReason == cause, "The capture failure reason was lost.");
+            AssertBitmapsEqual(expected, result.Image, "recovered capture prefix");
+        }
+
+        Require(!CaptureFrameBuffer.CanRecover(new OperationCanceledException(), CancellationToken.None)
+            && !CaptureFrameBuffer.CanRecover(new InvalidOperationException(), new CancellationToken(true))
+            && !CaptureFrameBuffer.CanRecover(new CaptureSizeLimitExceededException(100, 50), CancellationToken.None),
+            "Cancellation and the size-choice dialog must keep their own workflows.");
+    }
+
+    private static void FailedTrimRetainsTheUsableBitmap()
+    {
+        using Bitmap expected = CreateDeterministicBitmap(48, 72);
+        using CaptureFrameBuffer frames = new(1);
+        Bitmap source = (Bitmap)expected.Clone();
+        frames.Add(new CapturedFrame(source, 0, 50), null);
+        Rectangle bounds = new(Point.Empty, source.Size);
+        BitmapData held = source.LockBits(bounds, ImageLockMode.ReadOnly, source.PixelFormat);
+        CaptureResult result;
+        try
+        {
+            result = frames.Finish(new CaptureOptions(false, true), bounds, "Target",
+                finalRows: null, isPartial: false, failureReason: null, CancellationToken.None);
+        }
+        finally
+        {
+            source.UnlockBits(held);
+        }
+
+        using (result)
+        {
+            Require(result.IsPartial && result.FailureReason is not null && result.FrameCount == 1,
+                "A failed trim should offer the original usable viewport.");
+            AssertBitmapsEqual(expected, result.Image, "viewport retained after trim failure");
+        }
     }
 
     private static void CropSelectionMovesEachEdgeAndUpdatesMemory()

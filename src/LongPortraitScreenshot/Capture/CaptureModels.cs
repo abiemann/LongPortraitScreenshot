@@ -138,13 +138,19 @@ public sealed class CaptureResult : IDisposable
     }
 
     public CaptureResult(Bitmap image, string targetName, int frameCount, bool isPartial)
+        : this(image, targetName, frameCount, isPartial, failureReason: null)
+    {
+    }
+
+    internal CaptureResult(Bitmap image, string targetName, int frameCount, bool isPartial, string? failureReason)
     {
         ArgumentNullException.ThrowIfNull(image);
 
         Image = image;
         TargetName = string.IsNullOrWhiteSpace(targetName) ? "Scrolling control" : targetName;
         FrameCount = frameCount;
-        IsPartial = isPartial;
+        IsPartial = isPartial || failureReason is not null;
+        FailureReason = failureReason;
     }
 
     public Bitmap Image { get; }
@@ -154,6 +160,8 @@ public sealed class CaptureResult : IDisposable
     public int FrameCount { get; }
 
     public bool IsPartial { get; }
+
+    public string? FailureReason { get; }
 
     public void Dispose() => Image.Dispose();
 }

@@ -44,7 +44,7 @@ internal sealed class CapturePreviewForm : Form
         _preview = new ImageCropPreviewControl(image) { Dock = DockStyle.Fill };
 
         Text = isPartial
-            ? "Preview safe partial screenshot"
+            ? "Preview partial screenshot"
             : "Preview scrolling screenshot";
         ClientSize = new Size(1160, 760);
         MinimumSize = new Size(740, 480);
@@ -61,7 +61,7 @@ internal sealed class CapturePreviewForm : Form
             Dock = DockStyle.Fill,
             Font = new Font(Font, FontStyle.Bold),
             Text = isPartial
-                ? $"Safe partial capture · {targetName}"
+                ? $"Partial capture · {targetName}"
                 : targetName,
             TextAlign = ContentAlignment.BottomLeft
         };

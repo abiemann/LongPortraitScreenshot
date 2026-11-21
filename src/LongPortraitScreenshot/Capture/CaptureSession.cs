@@ -122,14 +122,12 @@ internal static class CaptureSession
                     "Try a different scrolling container.");
             }
 
-            List<CapturedFrame> frames = [];
-            List<int> measuredVerticalShifts = [];
-            List<int> measuredCompositionRows = [];
+            using CaptureFrameBuffer frames = new(MaximumFrames);
             long rawFramePixels = 0;
             long measuredStitchedHeight = captureBounds.Height;
             bool isPartial = false;
             int? finalFrameRowsToAppend = null;
-            Bitmap? stitched = null;
+            string? failureReason = null;
 
             Func<CapturedFrame> grabFrame = () =>
             {
@@ -262,12 +260,7 @@ internal static class CaptureSession
                             }
                         }
 
-                        frames.Add(capturedFrame);
-                        if (alignment is { } measured)
-                        {
-                            measuredVerticalShifts.Add(measured.Shift);
-                            measuredCompositionRows.Add(measured.CompositionSourceY);
-                        }
+                        frames.Add(capturedFrame, alignment);
 
                         if (stopAfterFrame)
                         {
@@ -334,63 +327,16 @@ internal static class CaptureSession
 
                     currentScroll = nextScroll;
                 }
-
-                ThrowIfCancelled(cancellationToken);
-                CancellationToken processingToken = cancellationToken;
-
-                stitched = VerticalStitcher.Stitch(
-                    frames,
-                    options.Mode == CaptureMode.Full
-                        ? long.MaxValue
-                        : CaptureSizePolicy.SafePixelLimit,
-                    processingToken,
-                    finalFrameRowsToAppend,
-                    measuredVerticalShifts,
-                    measuredCompositionRows);
-                int frameCount = frames.Count;
-                // Composition owns an independent bitmap; release the viewports before
-                // either crop pass allocates another output-sized image.
-                foreach (CapturedFrame frame in frames)
-                {
-                    frame.Image.Dispose();
-                }
-                frames.Clear();
-
-                if (options.CropVerticalScrollIndicator)
-                {
-                    processingToken.ThrowIfCancellationRequested();
-                    int scrollBarWidth = ScrollbarCropper.GetVerticalScrollBarWidth(captureBounds);
-                    Bitmap cropped = ScrollbarCropper.CropRight(stitched, scrollBarWidth);
-                    stitched.Dispose();
-                    stitched = cropped;
-                    processingToken.ThrowIfCancellationRequested();
-                }
-
-                if (options.TrimEmptyHorizontalSpace)
-                {
-                    Bitmap cropped = EmptySpaceCropper.Trim(stitched, processingToken);
-                    stitched.Dispose();
-                    stitched = cropped;
-                }
-
-                processingToken.ThrowIfCancellationRequested();
-
-                CaptureResult result = new(
-                    stitched,
-                    string.IsNullOrWhiteSpace(target.DisplayName) ? "Scrolling control" : target.DisplayName,
-                    frameCount,
-                    isPartial);
-                stitched = null;
-                return result;
             }
-            finally
+            catch (Exception failure) when (frames.Count > 0 && CaptureFrameBuffer.CanRecover(failure, cancellationToken))
             {
-                stitched?.Dispose();
-                foreach (CapturedFrame frame in frames)
-                {
-                    frame.Image.Dispose();
-                }
+                failureReason = failure.Message;
             }
+
+            ThrowIfCancelled(cancellationToken);
+            return frames.Finish(options, captureBounds,
+                string.IsNullOrWhiteSpace(target.DisplayName) ? "Scrolling control" : target.DisplayName,
+                finalFrameRowsToAppend, isPartial, failureReason, cancellationToken);
         }
         finally
         {

@@ -316,6 +316,28 @@ public sealed class MainForm : Form
         using (result)
         {
             _targetLabel.Text = result.TargetName;
+            if (result.FailureReason is string failureReason)
+            {
+                _statusLabel.Text = "Capture incomplete.";
+                TaskDialogButton review = TaskDialogButton.Yes;
+                var recoveryPage = new TaskDialogPage
+                {
+                    Caption = "Capture incomplete",
+                    Heading = "Review the partial screenshot?",
+                    Text = $"{failureReason}\n\n" +
+                        $"You can crop, copy, or save the {result.Image.Width:N0} × {result.Image.Height:N0} " +
+                        "image captured before the failure.",
+                    Icon = TaskDialogIcon.Warning,
+                    Buttons = { review, TaskDialogButton.No },
+                    DefaultButton = review,
+                    AllowCancel = true
+                };
+                if (TaskDialog.ShowDialog(this, recoveryPage, TaskDialogStartupLocation.CenterOwner) != review)
+                {
+                    _statusLabel.Text = "Capture failed. Partial screenshot discarded.";
+                    return;
+                }
+            }
 
             using CapturePreviewForm preview = new(
                 result.Image,
@@ -355,7 +377,9 @@ public sealed class MainForm : Form
             try
             {
                 _settings.Save();
-                string captureDescription = result.IsPartial ? "safe partial" : "complete";
+                string captureDescription = result.FailureReason is not null
+                    ? "partial"
+                    : result.IsPartial ? "safe partial" : "complete";
                 _statusLabel.Text =
                     $"Saved {captureDescription} {preview.SavedSize.Width:N0} × " +
                     $"{preview.SavedSize.Height:N0} PNG " +
